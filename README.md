@@ -40,7 +40,7 @@ With x64 Node.js 22 or later installed, run `./tools/build-exe.ps1` from PowerSh
 | **UI** | Stats overview, live countdowns, right-click menu on accounts, floating action bar for the selection, drag-to-reorder, group filter chips, and shortcuts: Ctrl+A select all, Enter launch, Del remove, Esc clear, Ctrl+F search. |
 | **Process tracking** | Every launch gets a unique browser-tracker ID. The manager reads it back from the process command line, so each PID maps to its account exactly. This survives manager restarts, because running clients are re-adopted. |
 | **Windows** | Rename windows to the account name, tile them in a grid, focus or minimize them. You can also close selected clients, all clients, or Roblox windows the manager didn't start. |
-| **Keep-alive watchdog** | Relaunches when a client crashes or is closed, restarts frozen clients (hung window), and detects **kicks and disconnects**: if the process is alive but presence says "not in game" twice in a row, it restarts it. Failures back off exponentially, there is a per-hour relaunch cap, an optional scheduled restart to fight memory leaks, and a fallback from a dead JobId to any public server. |
+| **Keep-alive watchdog** | Relaunches when a client crashes or is closed, restarts frozen clients (hung window), and detects **kicks and disconnects**: if the process is alive but presence says "not in game" twice in a row, it restarts it. Rejoins back off so Roblox rarely asks for verification: the first rejoin waits the relaunch delay (15 s by default), each further rejoin within 30 minutes waits twice as long (up to 10 minutes), and every wait gets a small random spread. Failures back off exponentially, there is a per-hour relaunch cap, an optional scheduled restart to fight memory leaks, and a fallback from a dead JobId to any public server. |
 | **Server browser** | Lists servers with players, ping and FPS, and loads more pages on request. Join with the selected accounts, or use a server as the launch target. Find a user's server by username and join it. |
 | **Client tweaks** | FPS cap and custom FFlags are merged into `ClientAppSettings.json` in every Roblox version folder. |
 | **Utilities** | Groups, aliases, descriptions, custom key/value fields, search and sort, friend the selected accounts with each other, export cookies, and open a browser logged in as any account (cookie changes in that browser are synced back). |
@@ -59,7 +59,7 @@ The manager's version check and launcher selection are separate from Roblox Play
 This manager does **not** auto-solve or bypass Roblox's captcha. It doesn't need to for unattended play:
 
 - A captcha appears only at **login**. You do that once per account in the login window.
-- After that, launching, relaunching, keep-alive and server-hopping all use the stored session and authentication tickets, which never show a captcha.
+- After that, launching, relaunching, keep-alive and server-hopping all use the stored session and authentication tickets, which normally don’t show a captcha. Roblox can still ask an account to verify if it rejoins very often; keep-alive spaces rejoins out to avoid that, and if Roblox does ask, it pauses that account for 30 minutes and alerts you instead of retrying. Open the account in the browser from the manager and complete the check yourself.
 - Sessions last a long time. Roblox's own cookie rotations are saved automatically, and "Validate" tells you if an account ever needs a fresh login.
 
 ## Security model

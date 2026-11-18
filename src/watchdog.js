@@ -5,6 +5,22 @@ const { logger } = require('./util');
 const { SAME_ACCOUNT } = require('./logwatch');
 
 const log = logger('watchdog');
+const VERIFY_PAUSE_MS = 30 * 60e3;   // after Roblox asks for verification, wait this long before trying again
+const MAX_REJOIN_DELAY_MS = 10 * 60e3;
+
+/**
+ * How long to wait before rejoining. Every relaunch asks Roblox for a new sign-in ticket and joins
+ * a game, and rapid repeats are what make Roblox ask for verification. So the first rejoin is quick,
+ * and each further one within 30 minutes waits twice as long (up to 10 minutes). The random spread
+ * keeps several accounts from rejoining in lockstep.
+ */
+function rejoinDelay(s, w, now = Date.now(), rand = Math.random) {
+  const recent = s.launches.filter((t) => now - t < 30 * 60e3).length;
+  const base = Math.max(5, w.relaunchDelaySec) * 1000;
+  const delay = Math.min(MAX_REJOIN_DELAY_MS, base * 2 ** Math.max(0, recent - 1));
+  return Math.round(delay * (0.85 + rand() * 0.4));
+}
+
 const PRESENCE = { 0: 'Offline', 1: 'Online (not in game)', 2: 'In game', 3: 'In Studio', 4: 'Invisible' };
 
 /**
@@ -76,7 +92,7 @@ class Watchdog extends EventEmitter {
       if (!acc || !acc.keepAlive.enabled) return;
       const s = this.st(inst.accountId);
       const w = this.settings.get('watchdog');
-      if (!s.nextAttemptAt || s.nextAttemptAt < Date.now()) s.nextAttemptAt = Date.now() + w.relaunchDelaySec * 1000;
+      if (!s.nextAttemptAt || s.nextAttemptAt < Date.now()) s.nextAttemptAt = Date.now() + rejoinDelay(s, w);
       s.msg = `client exited${inst.killReason ? ` (${inst.killReason})` : ''}; relaunching`;
     });
   }
@@ -168,6 +184,15 @@ class Watchdog extends EventEmitter {
       this.launcher.launch(acc.id, target, 'keep-alive').then(() => {
         s.failures = 0; s.nextAttemptAt = 0; s.msg = '';
       }, (e) => {
+        if (e && e.verification) {
+          // Don't keep asking: every attempt makes Roblox more suspicious. The person completes it.
+          s.nextAttemptAt = Date.now() + VERIFY_PAUSE_MS;
+          s.msg = 'Roblox wants verification: open this account in the browser (Open browser), complete the check, then keep-alive resumes';
+          log.warn(`${acc.username}: Roblox asked for verification; keep-alive retries in 30 min`);
+          this.alerts.send('launchFail', `${acc.username}: verification needed`, 'Roblox asked this account to verify before joining. Open it in the browser from the manager, complete the check, and keep-alive will resume (it retries every 30 minutes on its own).', { level: 'error', key: acc.id });
+          this.setStatus(s, 'error', s.msg);
+          return;
+        }
         s.failures++;
         const delay = Math.min(15 * 60e3, w.relaunchDelaySec * 1000 * 2 ** s.failures);
         s.nextAttemptAt = Date.now() + delay;
@@ -191,7 +216,7 @@ class Watchdog extends EventEmitter {
   async restart(acc, inst, reason) {
     const s = this.st(acc.id);
     s.badChecks = 0;
-    s.nextAttemptAt = Date.now() + this.settings.get('watchdog').relaunchDelaySec * 1000;
+    s.nextAttemptAt = Date.now() + rejoinDelay(s, this.settings.get('watchdog'));
     s.msg = reason;
     await this.launcher.kill([inst.pid], reason);
   }
@@ -231,4 +256,4 @@ class Watchdog extends EventEmitter {
   stop() { clearTimeout(this.timer); }
 }
 
-module.exports = { Watchdog };
+module.exports = { Watchdog, rejoinDelay };

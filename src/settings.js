@@ -35,7 +35,7 @@ const DEFAULTS = {
     graceSec: 150,             // don't judge presence right after launch
     badChecksToRestart: 2,
     disconnectGraceSec: 25,    // log says disconnected and no rejoin within this -> restart
-    relaunchDelaySec: 8,
+    relaunchDelaySec: 15,       // first rejoin; repeated rejoins back off (x2 each, max 10 min)
     killHungAfterSec: 120,
     maxRelaunchesPerHour: 15,
     fallbackToPublic: true,    // if a specific JobId keeps failing, join any server instead
@@ -102,7 +102,7 @@ class Settings extends EventEmitter {
     w.presenceIntervalSec = num(w.presenceIntervalSec, 45, 20, 600);
     w.graceSec = num(w.graceSec, 150, 30, 1200);
     w.badChecksToRestart = num(w.badChecksToRestart, 2, 1, 10);
-    w.relaunchDelaySec = num(w.relaunchDelaySec, 8, 0, 600);
+    w.relaunchDelaySec = num(w.relaunchDelaySec, 15, 0, 600);
     w.killHungAfterSec = num(w.killHungAfterSec, 120, 0, 3600);
     w.maxRelaunchesPerHour = num(w.maxRelaunchesPerHour, 15, 1, 120);
     w.restartEveryMin = num(w.restartEveryMin, 0, 0, 1440);

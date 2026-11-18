@@ -464,7 +464,12 @@ class Launcher extends EventEmitter {
   applyUpdateBlock() {
     const want = !!this.settings.get('neverUpdateRoblox');
     if (!want && this.updatesBlocked === false) return; // already restored
+    // Only undo a block this manager (this data folder) made, so a second copy of the manager with
+    // the setting off never re-enables Roblox's updater behind the back of the one that has it on.
+    const marker = path.join(DATA, 'updates-blocked');
+    if (!want && !fs.existsSync(marker)) { this.updatesBlocked = false; return; }
     const { changed, failed } = setUpdatersBlocked(want);
+    try { if (want) fs.writeFileSync(marker, '1'); else if (!failed.length) fs.rmSync(marker, { force: true }); } catch {}
     if (changed) log.info(want ? `blocked Roblox's updater in ${changed} place(s)` : `restored Roblox's updater in ${changed} place(s)`);
     for (const f of failed) log.warn(`could not ${want ? 'block' : 'restore'} Roblox updater ${f}`);
     this.updatesBlocked = want;
@@ -620,8 +625,9 @@ class Launcher extends EventEmitter {
     this.emit('launched', inst);
     log.info(`${name} running as pid ${found.pid}`);
     if (this.settings.get('autoTile')) setTimeout(() => this.tile().catch(() => {}), 8000);
+    // spread joins a little so many accounts never hit Roblox at a perfectly regular rhythm
     const delay = this.settings.get('launchDelaySec') * 1000;
-    if (delay) await sleep(delay);
+    if (delay) await sleep(Math.round(delay * (0.9 + Math.random() * 0.4)));
     return { pid: found.pid };
   }
 

@@ -70,6 +70,12 @@ function captureCookie(session, res) {
   }
 }
 
+/** True when Roblox answered with a verification challenge (captcha, 2-step, security check). */
+function isChallenge(res, text = '') {
+  if (res.headers.get('rblx-challenge-id') || res.headers.get('rblx-challenge-type')) return true;
+  return res.status === 403 && /challenge|captcha|verif/i.test(text);
+}
+
 // ---------------- endpoints ----------------
 const api = {
   request,
@@ -86,7 +92,12 @@ const api = {
     } catch { return null; }
   },
 
-  /** One-time ticket the client exchanges for a session. Never triggers a captcha. */
+  /**
+   * One-time ticket the client exchanges for a session. If Roblox answers with a verification
+   * challenge instead, this throws a RobloxError with .verification = true. The manager never tries
+   * to solve or skip it: the person has to complete it in a browser, and retrying only makes Roblox
+   * ask more often.
+   */
   async getAuthTicket(s) {
     const res = await request(s, 'POST', 'https://auth.roblox.com/v1/authentication-ticket/', {
       body: {}, returnResponse: true,
@@ -95,6 +106,11 @@ const api = {
     const ticket = res.headers.get('rbx-authentication-ticket');
     if (!ticket) {
       const t = await res.text().catch(() => '');
+      if (isChallenge(res, t)) {
+        const e = new RobloxError('Roblox asked this account to verify (captcha / security check) before it can join', res.status);
+        e.verification = true;
+        throw e;
+      }
       throw new RobloxError(`Could not get auth ticket (HTTP ${res.status})${res.status === 401 ? ' - cookie invalid/expired' : ''} ${t.slice(0, 200)}`, res.status);
     }
     return ticket;
@@ -193,4 +209,4 @@ const api = {
     request(s, 'PATCH', `https://users.roblox.com/v1/users/${userId}/display-names`, { body: { newDisplayName } }),
 };
 
-module.exports = { api, RobloxError, UA };
+module.exports = { isChallenge, api, RobloxError, UA };

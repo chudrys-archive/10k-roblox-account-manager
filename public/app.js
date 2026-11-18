@@ -924,7 +924,7 @@ const SETTINGS = [
     ['watchdog.presenceIntervalSec', 'num', 'Presence check interval (seconds)'],
     ['watchdog.graceSec', 'num', 'Grace period after launch (seconds)'],
     ['watchdog.badChecksToRestart', 'num', 'Failed checks before restart'],
-    ['watchdog.relaunchDelaySec', 'num', 'Relaunch delay (seconds)'],
+    ['watchdog.relaunchDelaySec', 'num', 'Relaunch delay (seconds)', 'Wait before the first rejoin. Further rejoins within 30 minutes wait twice as long each time (up to 10 minutes), so Roblox asks for verification far less often'],
     ['watchdog.killHungAfterSec', 'num', 'Restart frozen clients after (seconds, 0 = never)'],
     ['watchdog.maxRelaunchesPerHour', 'num', 'Max relaunches per account per hour'],
     ['watchdog.fallbackToPublic', 'bool', 'Fall back to any server', 'If a saved server keeps failing, join any server of the game'],
