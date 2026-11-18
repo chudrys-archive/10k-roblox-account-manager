@@ -101,6 +101,17 @@ function regDefault(key) {
   } catch { return null; }
 }
 
+/** The RobloxPlayerBeta.exe Roblox's installer registered as the installed client, or null. */
+function registeredClientExe() {
+  try {
+    const out = execFileSync('reg', ['query', 'HKCU\\Software\\ROBLOX Corporation\\Environments\\roblox-player', '/v', 'clientExe'],
+      { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
+    const m = out.match(/clientExe\s+REG_(?:EXPAND_)?SZ\s+(.*)/i);
+    const p = m && m[1].trim().replace(/^"(.*)"$/, '$1');
+    return p && /RobloxPlayerBeta\.exe$/i.test(p) && fs.existsSync(p) ? p : null;
+  } catch { return null; }
+}
+
 function versionDirs() {
   const roots = [
     path.join(process.env.LOCALAPPDATA || '', 'Roblox', 'Versions'),
@@ -171,10 +182,11 @@ function pickUpToDate(current, dirs) {
 /**
  * Like detectRoblox, but when skipUpdateCheck is on and the installed client is current,
  * returns RobloxPlayerBeta.exe directly so the launcher's update check is skipped.
- * With neverUpdate on, always returns the newest installed RobloxPlayerBeta.exe without going
- * through the launcher. The client's own updater is disabled separately (setUpdatersBlocked).
+ * With neverUpdate on, always returns the installed RobloxPlayerBeta.exe (the one Roblox registered,
+ * else the newest folder) without going through the launcher. The client's own updater is disabled
+ * separately (setUpdatersBlocked).
  */
-async function resolveRoblox(override, { testClientPath = '', skipUpdateCheck = true, neverUpdate = false, fetchImpl, dirs } = {}) {
+async function resolveRoblox(override, { testClientPath = '', skipUpdateCheck = true, neverUpdate = false, fetchImpl, dirs, registered } = {}) {
   if (testClientPath) {
     const pinned = detectRoblox(override, testClientPath);
     if (pinned) return pinned;
@@ -183,7 +195,11 @@ async function resolveRoblox(override, { testClientPath = '', skipUpdateCheck = 
   if (override && fs.existsSync(override)) return { path: override, via: 'settings' };
   const installed = dirs || versionDirs();
   if (neverUpdate && installed.length) {
-    const pinned = installed[0]; // newest installed folder (versionDirs sorts newest first)
+    // Keep starting the build Roblox registered as installed. With the updater blocked this never
+    // changes, so the kept version is used even if its exe is older on disk than another folder's.
+    const reg = registered === undefined ? registeredClientExe() : registered;
+    const regDir = reg && path.dirname(reg).toLowerCase();
+    const pinned = installed.find((d) => d.dir.toLowerCase() === regDir) || installed[0]; // else newest
     const version = path.basename(pinned.dir);
     try {
       const current = await currentRobloxVersion({ fetchImpl });

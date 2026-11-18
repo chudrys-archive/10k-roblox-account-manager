@@ -1,6 +1,6 @@
 {
   "name": "isas-roblox-account-manager",
-  "version": "4.1.0",
+  "version": "4.1.1",
   "private": true,
   "description": "Roblox multi-account manager: encrypted vault, multi-instance, keep-alive watchdog, server browser, local API.",
   "main": "src/main.js",

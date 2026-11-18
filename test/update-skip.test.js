@@ -111,3 +111,14 @@ test("Don't update Roblox disables the client's updaters and restores them when 
   assert.equal(fs.readFileSync(installer, "utf8"), "RobloxPlayerInstaller.exe", "restored intact");
   assert.ok(!fs.existsSync(installer + BLOCKED_SUFFIX));
 });
+
+test("Don't update Roblox keeps starting the build Roblox registered, not the newest file", async () => {
+  const newestFirst = [dirs[1], dirs[0]];
+  const kept = path.join(dirs[0].dir, "RobloxPlayerBeta.exe");
+  resetVersionCache();
+  const r = await resolveRoblox("", { neverUpdate: true, registered: kept, fetchImpl: fakeFetch({ clientVersionUpload: CURRENT }), dirs: newestFirst });
+  assert.equal(r.path, "old.exe", "the registered (kept) build wins over a newer-looking folder");
+  resetVersionCache();
+  const none = await resolveRoblox("", { neverUpdate: true, registered: null, fetchImpl: fakeFetch({ clientVersionUpload: CURRENT }), dirs: newestFirst });
+  assert.equal(none.path, "current.exe", "falls back to the newest folder when nothing is registered");
+});
