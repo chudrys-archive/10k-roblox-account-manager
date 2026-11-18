@@ -897,6 +897,33 @@ bind($('#btn-find-user'), async () => {
 $('#find-user').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('#btn-find-user').click(); });
 
 // ============================================================ settings
+function openCaptchaTest() {
+  const d = openDialog(`<h2>CAPTCHA simulator</h2>
+    <p class="lead">Run a local picture-selection challenge with synthetic tiles. The simulator automatically picks a tile and tests a wrong selection too.</p>
+    <div id="captcha-challenge"></div>
+    <div id="captcha-result" class="small" role="status"></div>
+    <div class="foot"><button type="button" class="btn" data-close>Close</button><button type="button" class="btn primary" id="captcha-run">Run simulation</button></div>`);
+  bind($('#captcha-run', d), async () => {
+    const challenge = $('#captcha-challenge', d);
+    const result = $('#captcha-result', d);
+    challenge.replaceChildren();
+    result.className = 'small';
+    result.textContent = 'Running simulation…';
+    try {
+      const r = await call('/ui/test/captcha', {});
+      challenge.innerHTML = `<p>Find the ${esc(r.target)}.</p><ul class="captcha-tiles">${r.tiles.map((tile, i) =>
+        `<li class="captcha-tile${i === r.selected ? ' selected' : ''}"><span aria-hidden="true">${esc(tile.symbol)}</span><span>${esc(tile.label)}${i === r.selected ? ' (selected)' : ''}</span></li>`
+      ).join('')}</ul>`;
+      result.textContent = `Automatic selection ${r.accepted ? 'accepted' : 'rejected'}. Wrong selection ${r.incorrectRejected ? 'rejected' : 'accepted'}.`;
+      result.className = r.accepted && r.incorrectRejected ? 'small okc' : 'small err';
+    } catch (e) {
+      result.textContent = 'Simulation failed.';
+      result.className = 'small err';
+      throw e;
+    }
+  });
+}
+
 let settingsDirty = false;
 const SETTINGS = [
   ['Launching', 'play', [
@@ -993,7 +1020,7 @@ function renderSettings() {
     </div>
     <div class="card"><h3>${icon('power')}App</h3>
       <p class="small muted" style="margin-top:0">"Start Manager.vbs" (or the desktop shortcut) runs the manager without a console window. Quitting never closes your Roblox clients; multi-instance stays protected until they are all closed.</p>
-      <div class="btn-row"><button class="btn" type="button" id="btn-shortcut">Create desktop shortcut</button><button class="btn" type="button" id="btn-test-alert">${icon('bell')}Send test alert</button></div>
+      <div class="btn-row"><button class="btn" type="button" id="btn-shortcut">Create desktop shortcut</button><button class="btn" type="button" id="btn-test-alert">${icon('bell')}Send test alert</button><button class="btn" type="button" id="btn-captcha-test">CAPTCHA simulator</button></div>
     </div>
     <div class="card"><h3>${icon('server')}API reference</h3><div class="small muted">Base: <span class="mono">${esc(S.apiUrl)}</span><br>
       <span class="mono">accounts</span> · <span class="mono">status</span> · <span class="mono">launch?account=NAME&placeId=ID[&jobId=]</span> · <span class="mono">kill?account=</span> · <span class="mono">keepalive?account=&placeId=&enabled=true</span> · <span class="mono">field?account=&key=[&value=]</span> · <span class="mono">cookie?account=</span><br>
@@ -1003,6 +1030,7 @@ function renderSettings() {
   <div class="save-bar"><button class="btn primary" type="submit" id="settings-save">Save settings</button><span class="muted small" id="settings-state"></span></div>`;
   settingsDirty = false;
   bind($('#btn-mp'), changeMasterPassword);
+  bind($('#btn-captcha-test'), openCaptchaTest);
   bind($('#btn-shortcut'), async () => { await call('/ui/shortcut', {}); toast('ok', 'Shortcut "Roblox Account Manager" added to your desktop'); });
   bind($('#btn-test-alert'), async () => {
     if (settingsDirty) throw new Error('Save settings first');

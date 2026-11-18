@@ -186,6 +186,18 @@ class Server {
 
     this.route('GET', '/ui/state', () => this.state(), { allowLocked: true });
     this.route('GET', '/ui/logs', () => ring.slice(-500), { allowLocked: true });
+    this.route('POST', '/ui/test/captcha', () => {
+      // The simulator generates its own challenge and uses no account or browser data.
+      const tiles = [
+        { label: 'triangle', symbol: '▲' }, { label: 'diamond', symbol: '◆' },
+        { label: 'circle', symbol: '●' }, { label: 'square', symbol: '■' },
+      ];
+      const expected = crypto.randomInt(tiles.length);
+      const target = tiles[expected].label;
+      const selected = tiles.findIndex((tile) => tile.label === target);
+      const verify = (submission) => submission === expected;
+      return { tiles, target, selected, accepted: verify(selected), incorrectRejected: !verify((expected + 1) % tiles.length) };
+    }, { allowLocked: true });
 
     this.route('POST', '/ui/unlock', async ({ body }) => {
       try { c.vault.unlock(body.password || ''); } catch (e) { await sleep(800); throw new HttpError(403, e.message); }

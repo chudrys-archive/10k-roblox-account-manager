@@ -56,6 +56,8 @@ The manager's version check and launcher selection are separate from Roblox Play
 
 ## About captchas
 
+In **Settings → App → CAPTCHA simulator**, select **Run simulation** to generate a synthetic picture-selection challenge. The manager highlights its automatic choice and shows how the simulator responds to correct and incorrect selections. The entire test runs inside the local manager.
+
 This manager does **not** auto-solve or bypass Roblox's captcha. It doesn't need to for unattended play:
 
 - A captcha appears only at **login**. You do that once per account in the login window.

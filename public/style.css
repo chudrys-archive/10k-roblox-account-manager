@@ -344,6 +344,11 @@ label.f { display: block; color: var(--text2); font-size: 12px; margin: 12px 0 5
 .lock form, .lock .card { width: 360px; text-align: center; }
 .lock .logo { width: 56px; height: 56px; font-size: 19px; margin: 0 auto 14px; border-radius: 16px; }
 
+.captcha-tiles { display: flex; flex-wrap: wrap; gap: 8px; padding: 0; list-style: none; }
+.captcha-tile { display: grid; flex: 1 0 85px; justify-items: center; gap: 4px; padding: 8px; border: 1px solid currentColor; border-radius: 8px; }
+.captcha-tile span:first-child { font-size: 24px; }
+.captcha-tile.selected { background: var(--accent); color: var(--on-accent); }
+
 /* ---------- compact density ---------- */
 .compact td { padding-top: 4px; padding-bottom: 4px; }
 .compact .avatar, .compact .avatar img, .compact .avatar .ph { width: 24px; height: 24px; border-radius: 7px; }
