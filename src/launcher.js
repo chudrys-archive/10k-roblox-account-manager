@@ -161,13 +161,28 @@ function pickUpToDate(current, dirs) {
 /**
  * Like detectRoblox, but when skipUpdateCheck is on and the installed client is current,
  * returns RobloxPlayerBeta.exe directly so the launcher's update check is skipped.
+ * With neverUpdate on, always returns the newest installed RobloxPlayerBeta.exe, even if it is
+ * outdated, so the launcher (which is what installs updates) never runs. Roblox's servers may
+ * refuse to let an outdated client join.
  */
-async function resolveRoblox(override, { skipUpdateCheck = true, fetchImpl, dirs } = {}) {
+async function resolveRoblox(override, { skipUpdateCheck = true, neverUpdate = false, fetchImpl, dirs } = {}) {
   if (override && fs.existsSync(override)) return { path: override, via: 'settings' };
+  const installed = dirs || versionDirs();
+  if (neverUpdate && installed.length) {
+    const pinned = installed[0]; // newest installed folder (versionDirs sorts newest first)
+    const version = path.basename(pinned.dir);
+    try {
+      const current = await currentRobloxVersion({ fetchImpl });
+      if (current.toLowerCase() !== version.toLowerCase()) {
+        log.warn(`staying on ${version} (current is ${current}); Roblox may refuse to let this client join`);
+      }
+    } catch { /* the check is informational only; launch anyway */ }
+    return { path: pinned.exe, via: `${version} (updates disabled)`, direct: true, pinned: true };
+  }
   if (skipUpdateCheck) {
     try {
       const current = await currentRobloxVersion({ fetchImpl });
-      const hit = pickUpToDate(current, dirs || versionDirs());
+      const hit = pickUpToDate(current, installed);
       if (hit) return { path: hit.exe, via: `${current} is current (update check skipped)`, direct: true };
       log.info(`installed client is not ${current}; using the launcher so it can update`);
     } catch (e) {
@@ -367,7 +382,10 @@ class Launcher extends EventEmitter {
   roblox() { return detectRoblox(this.settings.get('robloxPath')); }
   /** Used for launching: may skip the launcher's update check when the client is current. */
   resolveRoblox() {
-    return resolveRoblox(this.settings.get('robloxPath'), { skipUpdateCheck: this.settings.get('skipUpdateCheck') });
+    return resolveRoblox(this.settings.get('robloxPath'), {
+      skipUpdateCheck: this.settings.get('skipUpdateCheck'),
+      neverUpdate: this.settings.get('neverUpdateRoblox'),
+    });
   }
 
   applyFFlags(exePath) {

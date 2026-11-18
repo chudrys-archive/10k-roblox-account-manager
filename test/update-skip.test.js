@@ -57,3 +57,19 @@ test('resolveRoblox launches directly only when the installed client is current'
   const off = await resolveRoblox('', { skipUpdateCheck: false, fetchImpl: fakeFetch({ clientVersionUpload: CURRENT }), dirs });
   assert.ok(!off || !off.direct, 'setting off -> normal launcher path');
 });
+
+test('neverUpdate keeps launching the installed version, even when outdated', async () => {
+  const newestFirst = [dirs[1], dirs[0]];
+  resetVersionCache();
+  const outdated = await resolveRoblox('', { neverUpdate: true, fetchImpl: fakeFetch({ clientVersionUpload: 'version-ffffffffffffffff' }), dirs: newestFirst });
+  assert.equal(outdated.path, 'current.exe');
+  assert.equal(outdated.pinned, true);
+
+  resetVersionCache();
+  const offline = await resolveRoblox('', { neverUpdate: true, fetchImpl: async () => { throw new Error('offline'); }, dirs: newestFirst });
+  assert.equal(offline.path, 'current.exe', 'still launches when the version check fails');
+
+  resetVersionCache();
+  const none = await resolveRoblox('', { neverUpdate: true, fetchImpl: fakeFetch({ clientVersionUpload: CURRENT }), dirs: [] });
+  assert.ok(!none || !none.pinned, 'nothing installed -> normal launcher so Roblox can be installed');
+});
