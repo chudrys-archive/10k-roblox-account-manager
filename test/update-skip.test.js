@@ -58,7 +58,7 @@ test('resolveRoblox launches directly only when the installed client is current'
   assert.ok(!off || !off.direct, 'setting off -> normal launcher path');
 });
 
-test('neverUpdate keeps launching the installed version, even when outdated', async () => {
+test('neverUpdate starts the installed client directly, even when outdated', async () => {
   const newestFirst = [dirs[1], dirs[0]];
   resetVersionCache();
   const outdated = await resolveRoblox('', { neverUpdate: true, fetchImpl: fakeFetch({ clientVersionUpload: 'version-ffffffffffffffff' }), dirs: newestFirst });

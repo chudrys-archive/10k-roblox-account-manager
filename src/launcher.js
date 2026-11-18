@@ -161,9 +161,9 @@ function pickUpToDate(current, dirs) {
 /**
  * Like detectRoblox, but when skipUpdateCheck is on and the installed client is current,
  * returns RobloxPlayerBeta.exe directly so the launcher's update check is skipped.
- * With neverUpdate on, always returns the newest installed RobloxPlayerBeta.exe, even if it is
- * outdated, so the launcher (which is what installs updates) never runs. Roblox's servers may
- * refuse to let an outdated client join.
+ * With neverUpdate on, always returns the newest installed RobloxPlayerBeta.exe without going
+ * through RobloxPlayerLauncher.exe. This does NOT keep Roblox on an old version: the game client
+ * checks its own version at startup and runs RobloxPlayerInstaller.exe itself when it is outdated.
  */
 async function resolveRoblox(override, { skipUpdateCheck = true, neverUpdate = false, fetchImpl, dirs } = {}) {
   if (override && fs.existsSync(override)) return { path: override, via: 'settings' };
@@ -174,10 +174,10 @@ async function resolveRoblox(override, { skipUpdateCheck = true, neverUpdate = f
     try {
       const current = await currentRobloxVersion({ fetchImpl });
       if (current.toLowerCase() !== version.toLowerCase()) {
-        log.warn(`staying on ${version} (current is ${current}); Roblox may refuse to let this client join`);
+        log.warn(`starting ${version} (current is ${current}); the Roblox client will update itself when it starts`);
       }
     } catch { /* the check is informational only; launch anyway */ }
-    return { path: pinned.exe, via: `${version} (updates disabled)`, direct: true, pinned: true };
+    return { path: pinned.exe, via: `${version} (launcher skipped)`, direct: true, pinned: true };
   }
   if (skipUpdateCheck) {
     try {
