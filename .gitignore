@@ -1,0 +1,17 @@
+# --- PRIVATE: never commit ---
+# data/ holds the encrypted account vault (all your Roblox sessions), its backups,
+# settings (may contain your Discord webhook / API password), logs and runtime state.
+data/
+*.vault
+*.lock
+manager.lock
+lockholder.json
+instances.json
+.env
+*.env
+
+# runtime / tooling
+node_modules/
+*.log
+*.tmp
+.claude/

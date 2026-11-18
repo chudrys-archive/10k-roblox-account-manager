@@ -1,0 +1,145 @@
+'use strict';
+const fs = require('fs');
+const path = require('path');
+const { spawn, execFileSync } = require('child_process');
+const { ROOT, DATA, logger, readJson, atomicWrite, rmrf } = require('./util');
+const { Alerts } = require('./alerts');
+const { LogWatcher } = require('./logwatch');
+const { Settings } = require('./settings');
+const { WinHelper } = require('./winhelper');
+const { Vault } = require('./vault');
+const { AccountStore } = require('./accounts');
+const { Launcher } = require('./launcher');
+const { Watchdog } = require('./watchdog');
+const { BrowserManager, findBrowser } = require('./browser');
+const { Server } = require('./server');
+const { AntiAfk } = require('./antiafk');
+
+const log = logger('main');
+const LOCK = path.join(DATA, 'manager.lock');
+const noUi = process.argv.includes('--no-ui');
+
+function alive(pid) { try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } }
+
+function openUi(url, settings) {
+  const edge = findBrowser(settings.get('browserPath'));
+  if (edge) {
+    // app-mode window = looks like a desktop app, separate from normal browsing
+    spawn(edge, [`--app=${url}`, '--window-size=1400,900'], { detached: true, stdio: 'ignore' }).unref();
+  } else {
+    spawn('rundll32.exe', ['url.dll,FileProtocolHandler', url], { detached: true, stdio: 'ignore' }).unref();
+  }
+}
+
+const HIDDEN_LAUNCHER = path.join(ROOT, 'Start Manager.vbs');
+const RUN_KEY = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run';
+
+/** Start with Windows via the per-user Run key (no admin needed). Starts hidden, without opening the window. */
+function applyAutostart(on) {
+  try {
+    if (on) execFileSync('reg', ['add', RUN_KEY, '/v', 'IsaRobloxAccountManager', '/t', 'REG_SZ', '/d', `wscript.exe "${HIDDEN_LAUNCHER}" --no-ui`, '/f'], { windowsHide: true, stdio: 'ignore' });
+    else execFileSync('reg', ['delete', RUN_KEY, '/v', 'IsaRobloxAccountManager', '/f'], { windowsHide: true, stdio: 'ignore' });
+  } catch { /* delete of a missing value fails harmlessly */ }
+}
+
+/** Desktop shortcut that starts the manager without a console window (or opens it if running). */
+function createShortcut() {
+  const q = (s) => s.replace(/'/g, "''");
+  // our own icon: a borrowed Roblox icon would break when Roblox deletes old version folders on update
+  const icon = path.join(ROOT, 'assets', 'icon.ico');
+  const lines = [
+    "$s = (New-Object -ComObject WScript.Shell).CreateShortcut([IO.Path]::Combine([Environment]::GetFolderPath('Desktop'), 'Roblox Account Manager.lnk'))",
+    "$s.TargetPath = 'wscript.exe'",
+    `$s.Arguments = '"${q(HIDDEN_LAUNCHER)}"'`,
+    `$s.WorkingDirectory = '${q(ROOT)}'`,
+    "$s.Description = 'Isa''s Roblox Account Manager'",
+    fs.existsSync(icon) ? `$s.IconLocation = '${q(icon)},0'` : '',
+    '$s.Save()',
+  ].filter(Boolean).join('; ');
+  execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(lines, 'utf16le').toString('base64')], { windowsHide: true, stdio: 'ignore' });
+  return true;
+}
+
+async function main() {
+  const settings = new Settings();
+
+  // single instance: if already running, just open its UI
+  const lock = readJson(LOCK, null);
+  if (lock && lock.pid !== process.pid && alive(lock.pid)) {
+    try {
+      const r = await fetch(`http://127.0.0.1:${lock.port}/ui/state`, { signal: AbortSignal.timeout(3000) });
+      if (r.status === 401 || r.ok) {
+        console.log('Manager already running - opening its window.');
+        if (!noUi) openUi(`http://127.0.0.1:${lock.port}/?t=${lock.token}`, settings);
+        return;
+      }
+    } catch {}
+  }
+
+  // clean leftover temp browser profiles
+  try { for (const d of fs.readdirSync(path.join(DATA, 'tmp'))) await rmrf(path.join(DATA, 'tmp', d), 1); } catch {}
+
+  const helper = new WinHelper();
+  await helper.start();
+  const vault = new Vault(helper);
+  await vault.init();
+  const accounts = new AccountStore(vault);
+  const launcher = new Launcher({ helper, settings, accounts });
+  const alerts = new Alerts({ settings });
+  const logwatch = new LogWatcher({ launcher });
+  const watchdog = new Watchdog({ launcher, accounts, settings, logwatch, alerts });
+  const browser = new BrowserManager({ settings, accounts });
+  const antiAfk = new AntiAfk({ helper, launcher, settings, accounts });
+  accounts.on('invalid', (acc) => alerts.send('invalid', `${acc.username}: login needed`, `${acc.statusMsg || 'The saved session is no longer valid.'}\nRe-login from the account's Details.`, { level: 'error', key: acc.id }));
+  settings.on('change', (s) => applyAutostart(s.startWithWindows));
+
+  const onUnlocked = () => {
+    if (settings.get('autoValidateOnStart') && accounts.list.length) {
+      accounts.validateMany().catch((e) => log.warn('auto-validate: ' + e.message));
+    }
+  };
+
+  const ctx = { settings, vault, accounts, launcher, watchdog, browser, antiAfk, alerts, onUnlocked, createShortcut };
+  const server = new Server(ctx);
+  const port = await server.listen();
+  atomicWrite(LOCK, JSON.stringify({ pid: process.pid, port, token: server.token }));
+
+  if (!vault.locked) { accounts.load(); onUnlocked(); }
+  await launcher.init();
+  logwatch.start();
+  watchdog.start();
+  antiAfk.start();
+
+  const url = `http://127.0.0.1:${port}/?t=${server.token}`;
+  log.info(`UI ready on http://127.0.0.1:${port}`);
+  console.log(`\n  Isa's Roblox Account Manager is running.\n  UI: ${url}\n  (closing this window or Ctrl+C quits the manager; your Roblox clients keep running)\n`);
+  if (settings.get('openUiOnStart') && !noUi) openUi(url, settings);
+
+  let stopping = false;
+  const shutdown = async (sig) => {
+    if (stopping) return; stopping = true;
+    log.info(`shutting down (${sig})`);
+    watchdog.stop();
+    antiAfk.stop();
+    logwatch.stop();
+    launcher.stop();
+    accounts.saveNow();
+    await browser.closeAll().catch(() => {});
+    server.close();
+    helper.stop();
+    try { if (readJson(LOCK, {}).pid === process.pid) fs.rmSync(LOCK, { force: true }); } catch {}
+    setTimeout(() => process.exit(0), 300);
+  };
+  ctx.shutdown = shutdown;
+  process.on('SIGINT', () => shutdown('SIGINT'));
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGHUP', () => shutdown('SIGHUP')); // console window closed
+  process.on('uncaughtException', (e) => log.error('uncaught: ' + (e.stack || e.message)));
+  process.on('unhandledRejection', (e) => log.error('unhandled rejection: ' + (e && (e.stack || e.message))));
+}
+
+main().catch((e) => {
+  log.error('fatal: ' + (e.stack || e.message));
+  console.error('\nFATAL: ' + e.message);
+  process.exitCode = 1;
+});

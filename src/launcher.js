@@ -1,0 +1,613 @@
+'use strict';
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+const { spawn, execFileSync } = require('child_process');
+const EventEmitter = require('events');
+const { api, RobloxError } = require('./roblox');
+const { DATA, logger, sleep, atomicWrite, readJson } = require('./util');
+
+const log = logger('launcher');
+const INSTANCES_FILE = path.join(DATA, 'instances.json');
+const LOCK_STATUS = path.join(DATA, 'lockholder.json');
+const LOCK_STOP = path.join(DATA, 'lockholder.stop');
+const GUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+
+// ---------------- target parsing ----------------
+/**
+ * Accepts: place id, game URL, private server URL (privateServerLinkCode), share links
+ * (roblox.com/share?code=..&type=Server), roblox:// deep links, profile URLs, "@username"/"user:name" (follow).
+ * Returns a normalized target: {type, placeId, jobId, linkCode, accessCode, userId, label}
+ */
+async function resolveTarget(input, { jobId, session } = {}) {
+  let s = String(input || '').trim();
+  jobId = String(jobId || '').trim();
+  if (jobId && !GUID_RE.test(jobId)) throw new Error('Job ID must be a server GUID');
+  if (!s) throw new Error('Enter a place ID / game link / private server link / @username');
+
+  // follow user
+  const fm = s.match(/^(?:@|user:|follow:)\s*([A-Za-z0-9_]{3,20})$/i);
+  if (fm) {
+    const u = await api.usernameToUser(session, fm[1]);
+    return { type: 'follow', userId: u.id, label: `Follow ${u.name}` };
+  }
+  if (/^\d+$/.test(s)) {
+    const placeId = Number(s);
+    return jobId ? { type: 'job', placeId, jobId: jobId.toLowerCase(), label: `${placeId} / ${jobId.slice(0, 8)}` } : { type: 'game', placeId, label: String(placeId) };
+  }
+  if (/^roblox:\/\//i.test(s)) s = 'https://deeplink.local/?' + s.replace(/^roblox:\/\/(experiences\/start\?)?/i, '');
+  if (!/^https?:\/\//i.test(s)) s = 'https://' + s;
+  let u;
+  try { u = new URL(s); } catch { throw new Error('Unrecognized link / ID'); }
+  const q = u.searchParams;
+
+  if (/\/share$/i.test(u.pathname) || q.get('type') === 'Server' && q.get('code')) {
+    const code = q.get('code');
+    if (!code) throw new Error('Share link has no code');
+    const r = await api.resolveShareLink(session, code, q.get('type') || 'Server');
+    if (r.linkCode) return { type: 'private', placeId: r.placeId, linkCode: r.linkCode, label: `Private ${r.placeId}` };
+    return { type: 'game', placeId: r.placeId, label: String(r.placeId) };
+  }
+  const prof = u.pathname.match(/\/users\/(\d+)/i);
+  if (prof) return { type: 'follow', userId: Number(prof[1]), label: `Follow ${prof[1]}` };
+
+  const pm = u.pathname.match(/\/games\/(\d+)/i);
+  const placeId = Number(pm ? pm[1] : (q.get('placeId') || q.get('placeid')));
+  if (!placeId) throw new Error('Could not find a place ID in the link');
+  const link = q.get('privateServerLinkCode') || q.get('linkCode');
+  if (link) return { type: 'private', placeId, linkCode: link, label: `Private ${placeId}` };
+  const access = q.get('accessCode');
+  if (access) return { type: 'private', placeId, accessCode: access, label: `Private ${placeId}` };
+  const gid = jobId || q.get('gameInstanceId') || q.get('gameId') || q.get('jobId');
+  if (gid && GUID_RE.test(gid)) return { type: 'job', placeId, jobId: gid.toLowerCase(), label: `${placeId} / ${gid.slice(0, 8)}` };
+  return { type: 'game', placeId, label: String(placeId) };
+}
+
+function placeLauncherUrl(t, btid) {
+  const q = new URLSearchParams();
+  const origin = { game: 'PlayButton', job: 'publicServerListJoin', private: 'privateServerListJoin', follow: 'followUser' }[t.type];
+  switch (t.type) {
+    case 'game': q.set('request', 'RequestGame'); q.set('placeId', t.placeId); break;
+    case 'job': q.set('request', 'RequestGameJob'); q.set('placeId', t.placeId); q.set('gameId', t.jobId); break;
+    case 'private':
+      q.set('request', 'RequestPrivateGame'); q.set('placeId', t.placeId);
+      if (t.linkCode) q.set('linkCode', t.linkCode); else q.set('accessCode', t.accessCode);
+      break;
+    case 'follow': q.set('request', 'RequestFollowUser'); q.set('userId', t.userId); break;
+    default: throw new Error('bad target type ' + t.type);
+  }
+  q.set('browserTrackerId', btid);
+  q.set('isPlayTogetherGame', 'false');
+  q.set('joinAttemptId', crypto.randomUUID());
+  q.set('joinAttemptOrigin', origin);
+  return 'https://www.roblox.com/Game/PlaceLauncher.ashx?' + q.toString();
+}
+
+function launchUri(ticket, plUrl, btid) {
+  return ['roblox-player:1', 'launchmode:play', `gameinfo:${ticket}`, `launchtime:${Date.now()}`,
+    `placelauncherurl:${encodeURIComponent(plUrl)}`, `browsertrackerid:${btid}`,
+    'robloxLocale:en_us', 'gameLocale:en_us', 'channel:', 'LaunchExp:InApp'].join('+');
+}
+
+// ---------------- Roblox install detection ----------------
+function regDefault(key) {
+  try {
+    const out = execFileSync('reg', ['query', key, '/ve'], { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
+    const m = out.match(/REG_(?:EXPAND_)?SZ\s+(.*)/);
+    if (!m) return null;
+    const v = m[1].trim();
+    const q = v.match(/^"([^"]+)"/);
+    return q ? q[1] : v.split(/\s+/)[0];
+  } catch { return null; }
+}
+
+function versionDirs() {
+  const roots = [
+    path.join(process.env.LOCALAPPDATA || '', 'Roblox', 'Versions'),
+    path.join(process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)', 'Roblox', 'Versions'),
+  ];
+  const out = [];
+  for (const r of roots) {
+    let entries = [];
+    try { entries = fs.readdirSync(r); } catch { continue; }
+    for (const e of entries) {
+      const exe = path.join(r, e, 'RobloxPlayerBeta.exe');
+      try { out.push({ dir: path.join(r, e), exe, mtime: fs.statSync(exe).mtimeMs }); } catch {}
+    }
+  }
+  return out.sort((a, b) => b.mtime - a.mtime);
+}
+
+function detectRoblox(override) {
+  if (override && fs.existsSync(override)) return { path: override, via: 'settings' };
+  for (const key of ['HKCU\\Software\\Classes\\roblox-player\\shell\\open\\command', 'HKCR\\roblox-player\\shell\\open\\command']) {
+    const p = regDefault(key);
+    if (p && fs.existsSync(p)) return { path: p, via: 'protocol handler' };
+  }
+  const v = versionDirs()[0];
+  if (v) return { path: v.exe, via: 'Versions folder' };
+  return null;
+}
+
+// ---------------- launcher ----------------
+class Launcher extends EventEmitter {
+  constructor({ helper, settings, accounts }) {
+    super();
+    this.helper = helper;
+    this.settings = settings;
+    this.accounts = accounts;
+    this.instances = new Map(); // pid -> {pid, accountId, btid, startedAt, target, reason, hwnd, memMB, hung, hungSince}
+    this.btids = new Map();     // btid -> {accountId, at, target}
+    this.unknown = [];          // Roblox processes we didn't launch
+    this.queue = Promise.resolve();
+    this.pending = new Map();   // accountId -> promise
+    this.queued = [];           // accountIds waiting
+    this.tombstones = new Map(); // pid -> time we killed it (never re-adopt a dying process)
+    this.multiStatus = null;
+    this.lastSync = 0;
+  }
+
+  async init() {
+    const saved = readJson(INSTANCES_FILE, { instances: [], btids: [] });
+    for (const [k, v] of saved.btids || []) this.btids.set(k, v);
+    for (const i of saved.instances || []) this.instances.set(i.pid, i);
+    await this.applyMulti();
+    await this.sync();
+    this.settings.on('change', () => {
+      this.applyMulti().catch(() => {});
+      try { this.applyFFlags(this.roblox()?.path); } catch (e) { log.warn('FFlags: ' + e.message); }
+    });
+    this.timer = setInterval(() => this.sync().catch((e) => log.debug('sync: ' + e.message)), 3000);
+  }
+
+  get multiActive() { return !!(this.multiStatus && this.multiStatus.wanted && this.multiStatus.mutex === 'held'); }
+
+  /** Status written by the detached lock holder, or null if it isn't running. */
+  lockStatus() {
+    const s = readJson(LOCK_STATUS, null);
+    if (!s || Date.now() - s.at > 15000) return null;
+    try { process.kill(s.pid, 0); } catch (e) { if (e.code !== 'EPERM') return null; }
+    return s;
+  }
+
+  /**
+   * Multi-instance is provided by a detached lock-holder process (src/lockholder.ps1) that owns
+   * ROBLOX_singletonMutex. It deliberately outlives the manager, so restarting or crashing the
+   * manager never makes running clients close each other. Called on every sync (cheap).
+   */
+  async applyMulti() {
+    const want = !!this.settings.get('multiInstance');
+    let s = this.lockStatus();
+    if (want) {
+      try { fs.rmSync(LOCK_STOP, { force: true }); } catch {}
+      if (!s && Date.now() - (this.holderSpawnedAt || 0) > 10000) {
+        this.holderSpawnedAt = Date.now();
+        // Start-Process gives the holder its own hidden console, so it is independent of ours
+        // (Node's detached mode starts PowerShell with no console at all, and it exits at once).
+        const q = (s) => s.replace(/'/g, "''");
+        const cmd = `Start-Process -FilePath powershell.exe -WindowStyle Hidden -ArgumentList '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${q(path.join(__dirname, 'lockholder.ps1'))}" -DataDir "${q(DATA)}"'`;
+        spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(cmd, 'utf16le').toString('base64')], { stdio: 'ignore', windowsHide: true });
+        for (let i = 0; i < 40 && !s; i++) { await sleep(250); s = this.lockStatus(); }
+      }
+    } else if (s) {
+      try { fs.writeFileSync(LOCK_STOP, '1'); } catch {}
+    }
+    const prev = this.multiStatus;
+    const r = want ? { mutex: s ? s.mutex : 'lock holder not running', event: s ? s.event : '' } : { mutex: 'released', event: '' };
+    this.multiStatus = { wanted: want, ...r };
+    const changed = !prev || prev.wanted !== want || prev.mutex !== r.mutex;
+    if (!changed) return;
+    this.emit('change');
+    if (!want) log.info('multi-instance disabled');
+    else if (r.mutex === 'held') log.info('multi-instance active (singleton mutex owned)');
+    else log.warn('multi-instance NOT active yet: a Roblox client that was started outside the manager (or before it) owns the singleton lock. Close all Roblox windows once; the manager takes the lock automatically.');
+  }
+
+  persist() {
+    // keep only recent btids
+    const cutoff = Date.now() - 3 * 864e5;
+    for (const [k, v] of this.btids) if (v.at < cutoff) this.btids.delete(k);
+    try {
+      atomicWrite(INSTANCES_FILE, JSON.stringify({
+        instances: [...this.instances.values()].map(({ pid, accountId, btid, startedAt, target, reason }) => ({ pid, accountId, btid, startedAt, target, reason })),
+        btids: [...this.btids.entries()].slice(-500),
+      }));
+    } catch (e) { log.warn('persist failed: ' + e.message); }
+  }
+
+  isTombstoned(pid) {
+    const t = this.tombstones.get(pid);
+    if (!t) return false;
+    if (Date.now() - t > 120000) { this.tombstones.delete(pid); return false; } // pids get reused by Windows eventually
+    return true;
+  }
+
+  byAccount(accountId) { return [...this.instances.values()].filter((i) => i.accountId === accountId); }
+
+  windowTitle(acc) {
+    return (this.settings.get('windowTitle') || '{name}')
+      .replace(/\{name\}/g, this.accounts.displayName(acc))
+      .replace(/\{username\}/g, acc.username)
+      .replace(/\{alias\}/g, acc.alias || acc.username)
+      .replace(/\{userId\}/g, String(acc.userId))
+      .replace(/\{group\}/g, acc.group || '');
+  }
+
+  /** Reconcile tracked instances with real processes. */
+  async sync() {
+    if (this.syncing) return;
+    this.syncing = true;
+    try {
+      await this.applyMulti().catch((e) => log.debug('applyMulti: ' + e.message));
+      const procs = await this.helper.procs();
+      const live = new Map(procs.map((p) => [p.pid, p]));
+      let changed = false;
+      for (const [pid, inst] of this.instances) {
+        const p = live.get(pid);
+        if (!p || (inst.btid && p.btid && p.btid !== inst.btid)) {
+          // Roblox's starter process often relaunches itself (new PID, same launch args).
+          // Hand the instance over silently instead of reporting a crash.
+          const heir = inst.btid && !inst.killReason && procs.find((q) => q.btid === inst.btid && q.pid !== pid && !this.instances.has(q.pid) && !this.isTombstoned(q.pid));
+          if (heir) {
+            this.instances.delete(pid);
+            inst.pid = heir.pid;
+            inst.tunedPriority = null;
+            this.instances.set(heir.pid, inst);
+            changed = true;
+            log.info(`pid ${pid} handed off to ${heir.pid} (${this.accounts.get(inst.accountId)?.username || inst.accountId})`);
+            continue;
+          }
+          if (inst.btid && !inst.killReason && Date.now() - inst.startedAt < 20000) {
+            // just launched: give the relaunched process a moment to appear before declaring exit
+            continue;
+          }
+          this.instances.delete(pid);
+          changed = true;
+          log.info(`instance exited: pid ${pid} (${this.accounts.get(inst.accountId)?.username || inst.accountId})`);
+          this.emit('exit', inst);
+        }
+      }
+      // Adopt processes launched by us (incl. across manager restarts / slow starts).
+      // Identity rules that keep accounts from ever being mixed up:
+      //   - a process is only ever tied to an account through its unique launch tag (btid);
+      //   - one launch tag = at most one instance (Roblox's starter + real client share a tag;
+      //     the starter's exit is handled as a hand-off above, never as a second instance);
+      //   - a process we killed is never adopted again while it is still shutting down.
+      const trackedTags = new Set([...this.instances.values()].map((i) => i.btid).filter(Boolean));
+      const byTag = new Map();
+      for (const p of procs) {
+        if (this.instances.has(p.pid) || !p.btid || trackedTags.has(p.btid) || this.isTombstoned(p.pid)) continue;
+        const prev = byTag.get(p.btid);
+        if (!prev || Date.parse(p.start || 0) > Date.parse(prev.start || 0)) byTag.set(p.btid, p); // newest = real client
+      }
+      for (const p of byTag.values()) {
+        const b = this.btids.get(p.btid);
+        if (b && this.accounts.get(b.accountId)) {
+          this.instances.set(p.pid, { pid: p.pid, accountId: b.accountId, btid: p.btid, startedAt: p.start ? Date.parse(p.start) : Date.now(), target: b.target, reason: 'adopted' });
+          changed = true;
+          log.info(`adopted pid ${p.pid} for ${this.accounts.get(b.accountId).username}`);
+        }
+      }
+      const rename = this.settings.get('renameWindows');
+      for (const inst of this.instances.values()) {
+        const p = live.get(inst.pid);
+        if (!p) continue; // in post-launch grace window
+        inst.hwnd = p.hwnd; inst.memMB = p.memMB; inst.minimized = p.minimized;
+        inst.hung = p.hung;
+        inst.hungSince = p.hung ? (inst.hungSince || Date.now()) : null;
+        const acc = this.accounts.get(inst.accountId);
+        if (rename && acc && p.hwnd) {
+          const want = this.windowTitle(acc);
+          if (p.title !== want) this.helper.call('settitle', { hwnd: p.hwnd, title: want }).catch(() => {});
+        }
+      }
+      this.unknown = procs.filter((p) => !this.instances.has(p.pid)).map((p) => ({ pid: p.pid, title: p.title, memMB: p.memMB, hwnd: p.hwnd }));
+      // resource tuning: priority (re-applied if the setting changes) + periodic memory trim
+      for (const inst of this.instances.values()) this.tuneInstance(inst);
+      await this.applyAudio().catch((e) => log.debug('audio: ' + e.message));
+      const trimMin = this.settings.get('trimMemoryMin');
+      if (trimMin && Date.now() - (this.lastTrim || 0) > trimMin * 60000 && this.instances.size) {
+        this.lastTrim = Date.now();
+        this.helper.call('tune', { pids: [...this.instances.keys()], trim: true }).then((n) => log.info(`trimmed memory of ${n} client(s)`), () => {});
+      }
+      this.lastSync = Date.now();
+      if (changed) this.persist();
+      this.emit('change');
+    } finally { this.syncing = false; }
+  }
+
+  roblox() { return detectRoblox(this.settings.get('robloxPath')); }
+
+  applyFFlags(exePath) {
+    const fps = this.settings.get('fpsCap');
+    const custom = this.settings.get('customFFlags');
+    const flags = custom ? JSON.parse(custom) : {};
+    if (fps) flags.DFIntTaskSchedulerTargetFps = fps;
+    // remove flags we wrote before but which are no longer configured
+    const managedFile = path.join(DATA, 'fflags-managed.json');
+    const prevManaged = readJson(managedFile, []);
+    const removed = prevManaged.filter((k) => !(k in flags));
+    if (!Object.keys(flags).length && !removed.length) return;
+    const dirs = new Set(versionDirs().map((v) => v.dir));
+    if (exePath && /RobloxPlayerBeta\.exe$/i.test(exePath)) dirs.add(path.dirname(exePath));
+    for (const d of dirs) {
+      try {
+        const cs = path.join(d, 'ClientSettings');
+        fs.mkdirSync(cs, { recursive: true });
+        const f = path.join(cs, 'ClientAppSettings.json');
+        const cur = readJson(f, {});
+        const next = { ...cur, ...flags };
+        for (const k of removed) delete next[k];
+        if (JSON.stringify(cur) !== JSON.stringify(next)) atomicWrite(f, JSON.stringify(next, null, 2));
+      } catch (e) { log.warn(`could not write FFlags in ${d}: ${e.message}`); }
+    }
+    try { atomicWrite(managedFile, JSON.stringify(Object.keys(flags))); } catch {}
+  }
+
+  /** Queue a launch. Launches run one at a time so process<->account mapping is unambiguous. */
+  launch(accountId, target, reason = 'manual', opts = {}) {
+    if (this.pending.has(accountId)) return this.pending.get(accountId);
+    this.queued.push(accountId);
+    this.emit('change');
+    const p = this.queue.then(() => this._launch(accountId, target, reason, opts));
+    this.queue = p.catch(() => {});
+    const done = () => {
+      this.pending.delete(accountId);
+      this.queued = this.queued.filter((x) => x !== accountId);
+      this.emit('change');
+    };
+    p.then(done, done);
+    this.pending.set(accountId, p);
+    return p;
+  }
+
+  async _launch(accountId, target, reason, opts = {}) {
+    const acc = this.accounts.get(accountId);
+    if (!acc) throw new Error('account no longer exists');
+    const name = acc.username;
+    const existing = this.byAccount(accountId);
+    const mode = opts.replace ? 'replace' : this.settings.get('onAlreadyRunning');
+    if (existing.length) {
+      if (mode === 'skip') { log.info(`${name} already running; skipped`); return { pid: existing[0].pid, skipped: true }; }
+      if (mode === 'replace') {
+        log.info(`${name} already running; closing old client first`);
+        await this.kill(existing.map((i) => i.pid), 'replaced');
+        await sleep(1500);
+      }
+    }
+    const rbx = this.roblox();
+    if (!rbx) throw new Error('Roblox is not installed (could not find RobloxPlayerBeta / roblox-player handler)');
+    if (this.settings.get('multiInstance')) {
+      await this.applyMulti();
+      // Without the lock, starting another client would silently close the running ones.
+      const others = [...this.instances.values()].filter((i) => i.accountId !== accountId).length + this.unknown.length;
+      if (!this.multiActive && others > 0) {
+        throw new Error('Multi-instance lock is held by a running Roblox client, so launching would close the others. Close all Roblox windows once (Clients -> Close ALL) and launch again.');
+      }
+    }
+    this.applyFFlags(rbx.path);
+
+    const session = this.accounts.session(acc);
+    let ticket;
+    try { ticket = await api.getAuthTicket(session); } catch (e) {
+      if (e instanceof RobloxError && e.status === 401) {
+        this.accounts.setStatus(acc, 'invalid', 'Cookie expired or revoked - re-login needed'); this.accounts.save();
+      }
+      throw e;
+    }
+    const btid = `${Date.now()}${crypto.randomInt(100, 999)}`;
+    const uri = launchUri(ticket, placeLauncherUrl(target, btid), btid);
+    this.btids.set(btid, { accountId, at: Date.now(), target });
+    this.persist();
+
+    const before = new Set((await this.helper.procs()).map((p) => p.pid));
+    log.info(`launching ${name} -> ${target.label || target.type} (${reason})`);
+    try {
+      const child = spawn(rbx.path, [uri], { detached: true, stdio: 'ignore', windowsHide: false });
+      child.on('error', (e) => log.error('spawn error: ' + e.message));
+      child.unref();
+    } catch (e) {
+      log.warn(`direct spawn failed (${e.message}); falling back to protocol handler`);
+      spawn('rundll32.exe', ['url.dll,FileProtocolHandler', uri], { detached: true, stdio: 'ignore' }).unref();
+    }
+
+    const deadline = Date.now() + this.settings.get('launchTimeoutSec') * 1000;
+    let found = null;
+    while (Date.now() < deadline) {
+      await sleep(1000);
+      const procs = await this.helper.procs().catch(() => []);
+      const tagged = procs.filter((p) => p.btid === btid && !this.isTombstoned(p.pid));
+      found = tagged.sort((a, b) => Date.parse(b.start || 0) - Date.parse(a.start || 0))[0];
+      // Untagged process (command line unreadable): accept it only when it is unambiguous -
+      // exactly one new untagged Roblox process and no other launch still waiting to be matched.
+      if (!found) {
+        const untagged = procs.filter((p) => !p.btid && !before.has(p.pid) && !this.instances.has(p.pid) && !this.isTombstoned(p.pid));
+        const otherWaiting = [...this.btids.entries()].some(([t, v]) => t !== btid && Date.now() - v.at < 180000 && ![...this.instances.values()].some((i) => i.btid === t));
+        if (untagged.length === 1 && !otherWaiting) found = untagged[0];
+      }
+      if (found) break;
+    }
+    if (!found) throw new Error(`Roblox did not start for ${name} within ${this.settings.get('launchTimeoutSec')}s (it will be adopted if it appears later)`);
+    const inst = { pid: found.pid, accountId, btid, startedAt: Date.now(), target, reason, hwnd: found.hwnd };
+    // the sync loop may already have adopted this launch (possibly under the starter's pid): replace, never duplicate
+    for (const [pid, i] of this.instances) if (i.btid === btid) this.instances.delete(pid);
+    this.instances.set(found.pid, inst);
+    acc.lastUsedAt = Date.now();
+    acc.lastTarget = target;
+    this.accounts.save();
+    this.persist();
+    this.tuneInstance(inst);
+    this.emit('launched', inst);
+    log.info(`${name} running as pid ${found.pid}`);
+    if (this.settings.get('autoTile')) setTimeout(() => this.tile().catch(() => {}), 8000);
+    const delay = this.settings.get('launchDelaySec') * 1000;
+    if (delay) await sleep(delay);
+    return { pid: found.pid };
+  }
+
+  /** Where an account "is": its running client's target, else keep-alive target, else last launch. */
+  currentTarget(acc) {
+    const inst = this.byAccount(acc.id)[0];
+    return (inst && inst.target) || (acc.keepAlive.enabled && acc.keepAlive.target) || acc.lastTarget || null;
+  }
+
+  /** Close and relaunch into the same target (works with or without keep-alive). */
+  async restart(accountId) {
+    const acc = this.accounts.get(accountId);
+    if (!acc) throw new Error('account not found');
+    const t = this.currentTarget(acc);
+    if (!t) throw new Error(`${acc.username}: nothing to restart into (launch it once first)`);
+    return this.launch(accountId, t, 'restart', { replace: true });
+  }
+
+  /**
+   * Move an account to a different server of the same place. Picks a random non-full server that
+   * isn't the current one (prefers servers with room for a party), then relaunches into it.
+   * Keep-alive follows the account to the new server.
+   */
+  async serverHop(accountId, { preferSmall = false } = {}) {
+    const acc = this.accounts.get(accountId);
+    if (!acc) throw new Error('account not found');
+    const session = this.accounts.session(acc);
+    let t = this.currentTarget(acc);
+    let placeId = t && t.placeId;
+    let currentJob = t && t.jobId;
+    try {
+      const [p] = await api.getPresence(session, [acc.userId]);
+      if (p && p.userPresenceType === 2) { placeId = p.placeId || placeId; currentJob = p.gameId || currentJob; }
+    } catch {}
+    if (!placeId) throw new Error(`${acc.username}: not in a game and no previous place to hop in`);
+    const r = await api.getServers(session, placeId, { sortOrder: preferSmall ? 'Asc' : 'Desc', excludeFull: true });
+    const open = (r.data || []).filter((s) => s.id !== currentJob && s.playing < s.maxPlayers - 1);
+    if (!open.length) throw new Error('no other open servers found');
+    const pool = open.slice(0, Math.max(5, Math.ceil(open.length / 3)));
+    const pick = pool[Math.floor(Math.random() * pool.length)];
+    const target = { type: 'job', placeId, jobId: pick.id, label: `${placeId} / ${pick.id.slice(0, 8)}` };
+    if (acc.keepAlive.enabled) { acc.keepAlive.target = target; this.accounts.save(); }
+    log.info(`${acc.username}: server hop -> ${pick.id.slice(0, 8)} (${pick.playing}/${pick.maxPlayers})`);
+    return this.launch(accountId, target, 'server hop', { replace: true });
+  }
+
+  /**
+   * Audio: muteMode 'all' mutes every client, 'background' lets only the focused client play sound.
+   * Per-account override: fields.audio = 'mute' | 'unmute'. Re-applied every 15 s because Roblox
+   * creates its audio session lazily (and re-creates it after a device change).
+   * With mode 'none' we only undo mutes we applied ourselves, never touching the user's mixer.
+   */
+  async applyAudio() {
+    const mode = this.settings.get('muteMode');
+    const insts = [...this.instances.values()];
+    if (!insts.length) return;
+    let fgPid = 0;
+    if (mode === 'background') { try { fgPid = (await this.helper.call('foreground')).pid; } catch {} }
+    const now = Date.now();
+    const refresh = now - (this.lastAudio || 0) > 15000;
+    const groups = { true: [], false: [] };
+    for (const inst of insts) {
+      const acc = this.accounts.get(inst.accountId);
+      const ov = acc && acc.fields && acc.fields.audio;
+      let want = ov === 'mute' ? true : ov === 'unmute' ? false
+        : mode === 'all' ? true : mode === 'background' ? inst.pid !== fgPid : null;
+      if (want === null) { if (inst.muted) want = false; else continue; }
+      if (want !== inst.muted || refresh) groups[want].push(inst);
+    }
+    if (refresh) this.lastAudio = now;
+    for (const flag of [true, false]) {
+      const list = groups[flag];
+      if (!list.length) continue;
+      await this.helper.call('mute', { pids: list.map((i) => i.pid), mute: flag });
+      const changed = list.some((i) => i.muted !== flag);
+      for (const i of list) i.muted = flag;
+      if (changed) this.emit('change');
+    }
+  }
+
+  /** Apply CPU priority to a client (memory trim is periodic, see sync()). */
+  tuneInstance(inst) {
+    const pr = this.settings.get('clientPriority');
+    if (inst.tunedPriority === pr) return;
+    inst.tunedPriority = pr;
+    this.helper.call('tune', { pids: [inst.pid], priority: pr }).catch(() => {});
+  }
+
+  /**
+   * Launch many accounts. sameServer: first account joins, its JobId is read from presence,
+   * then the rest join that exact server.
+   */
+  async launchMany(ids, target, { sameServer = false, reason = 'manual' } = {}) {
+    const results = [];
+    if (!sameServer || target.type !== 'game' || ids.length < 2) {
+      const ps = ids.map((id) => this.launch(id, target, reason).then((r) => ({ id, ok: true, ...r }), (e) => ({ id, ok: false, error: e.message })));
+      return Promise.all(ps);
+    }
+    const [first, ...rest] = ids;
+    try { results.push({ id: first, ok: true, ...(await this.launch(first, target, reason)) }); } catch (e) {
+      return [{ id: first, ok: false, error: e.message }, ...rest.map((id) => ({ id, ok: false, error: 'first account failed' }))];
+    }
+    const acc = this.accounts.get(first);
+    let jobId = null;
+    const until = Date.now() + 120000;
+    while (Date.now() < until && !jobId) {
+      await sleep(5000);
+      try {
+        const [p] = await api.getPresence(this.accounts.session(acc), [acc.userId]);
+        if (p && p.userPresenceType === 2 && p.gameId) jobId = p.gameId;
+      } catch {}
+    }
+    const t2 = jobId ? { type: 'job', placeId: target.placeId, jobId, label: `${target.placeId} / ${jobId.slice(0, 8)}` } : { type: 'follow', userId: acc.userId, label: `Follow ${acc.username}` };
+    log.info(jobId ? `same-server: joining ${jobId}` : 'same-server: could not read JobId, following first account instead');
+    const ps = rest.map((id) => this.launch(id, t2, reason).then((r) => ({ id, ok: true, ...r }), (e) => ({ id, ok: false, error: e.message })));
+    return results.concat(await Promise.all(ps));
+  }
+
+  async kill(pids, why = 'manual') {
+    pids = [].concat(pids).filter(Boolean).map(Number);
+    if (!pids.length) return 0;
+    for (const pid of pids) this.tombstones.set(pid, Date.now());
+    const n = await this.helper.call('kill', { pids });
+    for (const pid of pids) {
+      const inst = this.instances.get(pid);
+      if (inst) { this.instances.delete(pid); inst.killReason = why; this.emit('exit', inst); }
+    }
+    this.persist();
+    this.emit('change');
+    log.info(`killed ${n} process(es) (${why})`);
+    return n;
+  }
+
+  async killAll(includeUnknown = true) {
+    const pids = [...this.instances.keys(), ...(includeUnknown ? this.unknown.map((u) => u.pid) : [])];
+    return this.kill(pids, 'close all');
+  }
+
+  async tile() {
+    const order = new Map(this.accounts.list.map((a, i) => [a.id, i]));
+    const hwnds = [...this.instances.values()].filter((i) => i.hwnd)
+      .sort((a, b) => (order.get(a.accountId) ?? 999) - (order.get(b.accountId) ?? 999)).map((i) => i.hwnd);
+    return this.helper.call('tile', { hwnds, cols: this.settings.get('tileColumns') });
+  }
+
+  async windowCmd(pid, cmd) {
+    const inst = this.instances.get(Number(pid)) || this.unknown.find((u) => u.pid === Number(pid));
+    if (!inst || !inst.hwnd) throw new Error('window not found');
+    if (cmd === 'focus') return this.helper.call('focus', { hwnd: inst.hwnd });
+    return this.helper.call('show', { hwnd: inst.hwnd, mode: cmd === 'minimize' ? 6 : 9 });
+  }
+
+  publicView() {
+    return {
+      instances: [...this.instances.values()].map((i) => ({
+        pid: i.pid, accountId: i.accountId, startedAt: i.startedAt, target: i.target, reason: i.reason,
+        memMB: i.memMB, hung: i.hung, minimized: i.minimized, muted: !!i.muted, verified: i.verified ?? null,
+        log: i.logState ? { inGame: i.logState.inGame, jobId: i.logState.jobId, placeId: i.logState.placeId, reason: i.logState.reason, disconnectedAt: i.logState.disconnectedAt || 0 } : null,
+      })),
+      unknown: this.unknown,
+      queued: this.queued,
+      multi: this.multiStatus,
+    };
+  }
+
+  stop() { clearInterval(this.timer); this.persist(); }
+}
+
+module.exports = { Launcher, resolveTarget, placeLauncherUrl, launchUri, detectRoblox };

@@ -1,0 +1,13 @@
+{
+  "name": "isas-roblox-account-manager",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Roblox multi-account manager: encrypted vault, multi-instance, keep-alive watchdog, server browser, local API.",
+  "main": "src/main.js",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "start": "node src/main.js",
+    "test": "node --test test/core.test.js test/watchdog.test.js test/logwatch.test.js test/identity.test.js"
+  },
+  "license": "UNLICENSED"
+}

@@ -1,0 +1,143 @@
+'use strict';
+const fs = require('fs');
+const path = require('path');
+const EventEmitter = require('events');
+const { logger } = require('./util');
+
+const log = logger('logwatch');
+const LOG_DIR = path.join(process.env.LOCALAPPDATA || '', 'Roblox', 'logs');
+
+// Disconnect reason codes as shown in Roblox's "Disconnected" dialog.
+const REASONS = {
+  260: 'problem receiving data', 264: 'same account launched elsewhere', 266: 'connection timed out',
+  267: 'kicked from the experience', 268: 'kicked for unexpected client behavior', 271: 'server shut down',
+  272: 'disconnected (content error)', 273: 'same account launched elsewhere', 274: 'server is shutting down',
+  277: 'lost connection to the server', 278: 'disconnected for being idle', 279: 'failed to connect',
+  285: 'left the game', 286: 'server full / unavailable', 288: 'experience restricted',
+};
+const SAME_ACCOUNT = new Set([264, 273]);
+
+/**
+ * Tails each managed client's own Roblox log. A log is tied to its client by the unique launch tag
+ * we pass (it appears as suggestedBrowserTrackerId=<btid>), so this never confuses clients.
+ *
+ * Gives near-instant knowledge of:
+ *   - "! Joining game '<jobId>' place <placeId>"  -> in game, exact server
+ *   - "Disconnection Notification. Reason: N" / "Connection lost" / "Sending disconnect with reason: N"
+ * Roblox teleports also disconnect briefly, so callers should only act when a disconnect is NOT
+ * followed by a new join within a grace period while the process is still alive.
+ */
+class LogWatcher extends EventEmitter {
+  constructor({ launcher, dir = LOG_DIR }) {
+    super();
+    this.launcher = launcher;
+    this.dir = dir;
+    this.claimed = new Set(); // log files already tied to an instance
+    this.files = new Map();   // pid -> {file, offset, rest}
+  }
+
+  start() {
+    this.timer = setInterval(() => { try { this.tick(); } catch (e) { log.debug(e.message); } }, 2000);
+    this.launcher.on('exit', (inst) => { const f = this.files.get(inst.pid); if (f) this.files.delete(inst.pid); });
+  }
+
+  tick() {
+    const insts = [...this.launcher.instances.values()];
+    const unmatched = insts.filter((i) => !this.files.has(i.pid) && i.btid && !i.logMissing);
+    if (unmatched.length) this.match(unmatched);
+    for (const inst of insts) {
+      const f = this.files.get(inst.pid);
+      if (f) this.read(inst, f);
+    }
+  }
+
+  match(insts) {
+    let names;
+    try { names = fs.readdirSync(this.dir); } catch { return; }
+    const cands = [];
+    for (const n of names) {
+      if (!/_Player_[0-9A-F]+_last\.log$/i.test(n) || /Crash/i.test(n)) continue;
+      const full = path.join(this.dir, n);
+      if (this.claimed.has(full)) continue;
+      try { const st = fs.statSync(full); cands.push({ full, mtime: st.mtimeMs, birth: st.birthtimeMs }); } catch {}
+    }
+    for (const inst of insts) {
+      const since = (inst.startedAt || 0) - 120000;
+      for (const c of cands) {
+        if (this.claimed.has(c.full) || c.mtime < since) continue;
+        let head = '';
+        try {
+          const fd = fs.openSync(c.full, 'r');
+          const buf = Buffer.alloc(96 * 1024);
+          const n = fs.readSync(fd, buf, 0, buf.length, 0);
+          fs.closeSync(fd);
+          head = buf.toString('utf8', 0, n);
+        } catch { continue; }
+        if (!head.includes(`suggestedBrowserTrackerId=${inst.btid}`)) continue;
+        this.claimed.add(c.full);
+        // replay the whole file once so state (joined server, disconnects) is correct after adoption
+        this.files.set(inst.pid, { file: c.full, offset: 0, rest: '' });
+        inst.logState = inst.logState || { inGame: false };
+        log.debug(`pid ${inst.pid} -> ${path.basename(c.full)}`);
+        break;
+      }
+      // give up after 3 minutes (e.g. log folder elsewhere); presence checks still cover it
+      if (!this.files.has(inst.pid) && Date.now() - inst.startedAt > 180000) inst.logMissing = true;
+    }
+  }
+
+  read(inst, f) {
+    let size;
+    try { size = fs.statSync(f.file).size; } catch { return; }
+    if (size < f.offset) { f.offset = 0; f.rest = ''; }
+    if (size === f.offset) return;
+    const len = Math.min(size - f.offset, 4 * 1024 * 1024);
+    const buf = Buffer.alloc(len);
+    try {
+      const fd = fs.openSync(f.file, 'r');
+      fs.readSync(fd, buf, 0, len, f.offset);
+      fs.closeSync(fd);
+    } catch { return; }
+    f.offset += len;
+    const text = f.rest + buf.toString('utf8');
+    const lines = text.split('\n');
+    f.rest = lines.pop();
+    for (const line of lines) this.parse(inst, line);
+  }
+
+  parse(inst, line) {
+    const s = inst.logState || (inst.logState = { inGame: false });
+    let m = line.match(/! Joining game '([0-9a-f-]{36})' place (\d+)/i);
+    if (m) {
+      Object.assign(s, { inGame: true, jobId: m[1].toLowerCase(), placeId: Number(m[2]), joinedAt: Date.now(), disconnectedAt: 0, code: 0, reason: '' });
+      this.emit('join', inst, s);
+      this.launcher.emit('change');
+      return;
+    }
+    // The account the client actually joined as (written by Roblox on every join).
+    m = line.match(/\[FLog::AvatarJoinMetrics\]\s+userId = (\d+)/) || line.match(/game_join_loadtime:.*?\buserid:(\d+)/i);
+    if (m) {
+      const uid = Number(m[1]);
+      if (uid && uid !== s.userId) {
+        s.userId = uid;
+        this.emit('identity', inst, s);
+        this.launcher.emit('change');
+      }
+      return;
+    }
+    m = line.match(/Disconnection Notification\. Reason: (\d+)|Sending disconnect with reason: (\d+)/);
+    if (m || /\[FLog::Network\] Connection lost/.test(line)) {
+      const code = m ? Number(m[1] || m[2]) : (s.code || 0);
+      if (!s.disconnectedAt) s.disconnectedAt = Date.now();
+      if (code && (!s.code || s.code === 285)) s.code = code; // keep the most meaningful code
+      s.inGame = false;
+      s.reason = REASONS[s.code] || (s.code ? `code ${s.code}` : 'connection lost');
+      this.emit('disconnect', inst, s);
+      this.launcher.emit('change');
+    }
+  }
+
+  stop() { clearInterval(this.timer); }
+}
+
+module.exports = { LogWatcher, REASONS, SAME_ACCOUNT, LOG_DIR };
