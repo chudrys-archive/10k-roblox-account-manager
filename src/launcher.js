@@ -129,6 +129,54 @@ function detectRoblox(override) {
   return null;
 }
 
+// ---------------- skip the launcher's update check ----------------
+// RobloxPlayerLauncher.exe (the protocol handler) asks Roblox for the current version on every
+// launch and installs it before starting the game. If the newest installed Versions folder already
+// IS the current version, we can start RobloxPlayerBeta.exe directly and skip that step.
+// If we're behind (or can't tell), we go through the launcher so it can update - Roblox's servers
+// refuse outdated clients anyway.
+const VERSION_URL = 'https://clientsettingscdn.roblox.com/v2/client-version/WindowsPlayer';
+const VERSION_CACHE_MS = 5 * 60 * 1000;
+let versionCache = { value: null, at: 0 };
+function resetVersionCache() { versionCache = { value: null, at: 0 }; }
+
+/** Returns the current Windows client version string, e.g. "version-1a2b3c4d5e6f7a8b". */
+async function currentRobloxVersion({ fetchImpl = fetch, now = Date.now() } = {}) {
+  if (versionCache.value && now - versionCache.at < VERSION_CACHE_MS) return versionCache.value;
+  const res = await fetchImpl(VERSION_URL, { signal: AbortSignal.timeout(5000) });
+  if (!res.ok) throw new Error(`version check failed: HTTP ${res.status}`);
+  const data = await res.json();
+  const v = data && data.clientVersionUpload;
+  if (typeof v !== 'string' || !/^version-[0-9a-f]+$/i.test(v)) throw new Error('version check returned an unexpected answer');
+  versionCache = { value: v, at: now };
+  return v;
+}
+
+/** Pure decision: the installed folder to launch directly, or null if none is current. */
+function pickUpToDate(current, dirs) {
+  if (!current) return null;
+  return dirs.find((d) => path.basename(d.dir).toLowerCase() === current.toLowerCase()) || null;
+}
+
+/**
+ * Like detectRoblox, but when skipUpdateCheck is on and the installed client is current,
+ * returns RobloxPlayerBeta.exe directly so the launcher's update check is skipped.
+ */
+async function resolveRoblox(override, { skipUpdateCheck = true, fetchImpl, dirs } = {}) {
+  if (override && fs.existsSync(override)) return { path: override, via: 'settings' };
+  if (skipUpdateCheck) {
+    try {
+      const current = await currentRobloxVersion({ fetchImpl });
+      const hit = pickUpToDate(current, dirs || versionDirs());
+      if (hit) return { path: hit.exe, via: `${current} is current (update check skipped)`, direct: true };
+      log.info(`installed client is not ${current}; using the launcher so it can update`);
+    } catch (e) {
+      log.warn(`could not check Roblox version (${e.message}); using the launcher`);
+    }
+  }
+  return detectRoblox(override);
+}
+
 // ---------------- launcher ----------------
 class Launcher extends EventEmitter {
   constructor({ helper, settings, accounts }) {
@@ -317,6 +365,10 @@ class Launcher extends EventEmitter {
   }
 
   roblox() { return detectRoblox(this.settings.get('robloxPath')); }
+  /** Used for launching: may skip the launcher's update check when the client is current. */
+  resolveRoblox() {
+    return resolveRoblox(this.settings.get('robloxPath'), { skipUpdateCheck: this.settings.get('skipUpdateCheck') });
+  }
 
   applyFFlags(exePath) {
     const fps = this.settings.get('fpsCap');
@@ -375,7 +427,7 @@ class Launcher extends EventEmitter {
         await sleep(1500);
       }
     }
-    const rbx = this.roblox();
+    const rbx = await this.resolveRoblox();
     if (!rbx) throw new Error('Roblox is not installed (could not find RobloxPlayerBeta / roblox-player handler)');
     if (this.settings.get('multiInstance')) {
       await this.applyMulti();
@@ -401,7 +453,7 @@ class Launcher extends EventEmitter {
     this.persist();
 
     const before = new Set((await this.helper.procs()).map((p) => p.pid));
-    log.info(`launching ${name} -> ${target.label || target.type} (${reason})`);
+    log.info(`launching ${name} -> ${target.label || target.type} (${reason}) via ${rbx.via}`);
     try {
       const child = spawn(rbx.path, [uri], { detached: true, stdio: 'ignore', windowsHide: false });
       child.on('error', (e) => log.error('spawn error: ' + e.message));
@@ -610,4 +662,4 @@ class Launcher extends EventEmitter {
   stop() { clearInterval(this.timer); this.persist(); }
 }
 
-module.exports = { Launcher, resolveTarget, placeLauncherUrl, launchUri, detectRoblox };
+module.exports = { Launcher, resolveTarget, placeLauncherUrl, launchUri, detectRoblox, resolveRoblox, pickUpToDate, currentRobloxVersion, resetVersionCache };

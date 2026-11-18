@@ -16,6 +16,7 @@ const DEFAULTS = {
   launchTimeoutSec: 90,        // how long to wait for the Roblox process to appear
   onAlreadyRunning: 'replace', // 'replace' | 'skip' | 'allow'
   robloxPath: '',              // blank = auto-detect (registry handler / Versions folder)
+  skipUpdateCheck: true,       // launch RobloxPlayerBeta.exe directly when the installed version is current
   renameWindows: true,
   windowTitle: '{name}',       // {name} {username} {alias} {userId} {group}
   autoTile: false,

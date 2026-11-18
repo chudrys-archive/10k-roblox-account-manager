@@ -896,6 +896,7 @@ const SETTINGS = [
     ['launchTimeoutSec', 'num', 'Wait for client to start (seconds)'],
     ['onAlreadyRunning', [['replace', 'Close the old client first'], ['skip', 'Skip that account'], ['allow', 'Allow a second client']], 'If an account is already running', 'Roblox kicks duplicate sessions, so "close old" is recommended'],
     ['robloxPath', 'text', 'Roblox executable', 'Leave blank to auto-detect (also works with Bloxstrap/Fishstrap)'],
+    ['skipUpdateCheck', 'bool', 'Skip update check when current', 'Starts the game directly if your installed Roblox is already the latest version. Falls back to the normal launcher (which updates) when it is not'],
   ]],
   ['Anti-AFK', 'zap', [
     ['antiAfk.enabled', 'bool', 'Anti-AFK', 'Prevents the 20-minute idle kick'],

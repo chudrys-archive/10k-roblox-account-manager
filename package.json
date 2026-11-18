@@ -7,7 +7,7 @@
   "engines": { "node": ">=22" },
   "scripts": {
     "start": "node src/main.js",
-    "test": "node --test test/core.test.js test/watchdog.test.js test/logwatch.test.js test/identity.test.js"
+    "test": "node --test test/core.test.js test/watchdog.test.js test/logwatch.test.js test/identity.test.js test/update-skip.test.js"
   },
   "license": "UNLICENSED"
 }
