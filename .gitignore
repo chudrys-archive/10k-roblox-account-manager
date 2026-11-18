@@ -12,6 +12,7 @@ instances.json
 
 # runtime / tooling
 node_modules/
+dist/
 *.log
 *.tmp
 .claude/

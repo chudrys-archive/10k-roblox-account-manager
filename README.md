@@ -4,10 +4,20 @@ A from-scratch, zero-dependency Roblox multi-account manager for Windows. It's a
 
 ## Run
 
+On Windows x64, download and double-click the `Isa-Roblox-Account-Manager-*-win-x64.exe` release asset. The executable includes Node.js. It keeps your saved data in `%LOCALAPPDATA%\IsaRobloxAccountManager\data`.
+
+To move existing accounts from the source version, quit both versions and copy `accounts.vault` from the project's `data` folder into the executable's data folder before adding new accounts there. A Windows-protected vault needs the original Windows account on the same PC. Keep a private backup of the original vault.
+
+### Run from source
+
 1. Install Node.js 22+ (already present on this PC: v24).
 2. Double-click **`Start Manager.vbs`**, which runs without a console window. `start.bat` does the same but shows a console with live output. In Settings → App you can add a desktop shortcut.
 
 Starting it again while it's running just reopens the window. Quit from the sidebar; your Roblox clients keep running.
+
+### Build a Windows executable
+
+With x64 Node.js 22 or later installed, run `./tools/build-exe.ps1` from PowerShell in the project root. The executable is written to `dist` and can be attached to a GitHub Release. The build fetches the bundled Node.js version's license and packages the application files and runtime.
 
 ## Features
 

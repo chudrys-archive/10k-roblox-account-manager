@@ -31,13 +31,15 @@ function openUi(url, settings) {
   }
 }
 
+const PACKAGED_EXE = process.env.IRAM_LAUNCHER_EXE;
 const HIDDEN_LAUNCHER = path.join(ROOT, 'Start Manager.vbs');
 const RUN_KEY = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run';
 
 /** Start with Windows via the per-user Run key (no admin needed). Starts hidden, without opening the window. */
 function applyAutostart(on) {
+  const command = PACKAGED_EXE ? `"${PACKAGED_EXE}" --no-ui` : `wscript.exe "${HIDDEN_LAUNCHER}" --no-ui`;
   try {
-    if (on) execFileSync('reg', ['add', RUN_KEY, '/v', 'IsaRobloxAccountManager', '/t', 'REG_SZ', '/d', `wscript.exe "${HIDDEN_LAUNCHER}" --no-ui`, '/f'], { windowsHide: true, stdio: 'ignore' });
+    if (on) execFileSync('reg', ['add', RUN_KEY, '/v', 'IsaRobloxAccountManager', '/t', 'REG_SZ', '/d', command, '/f'], { windowsHide: true, stdio: 'ignore' });
     else execFileSync('reg', ['delete', RUN_KEY, '/v', 'IsaRobloxAccountManager', '/f'], { windowsHide: true, stdio: 'ignore' });
   } catch { /* delete of a missing value fails harmlessly */ }
 }
@@ -49,11 +51,11 @@ function createShortcut() {
   const icon = path.join(ROOT, 'assets', 'icon.ico');
   const lines = [
     "$s = (New-Object -ComObject WScript.Shell).CreateShortcut([IO.Path]::Combine([Environment]::GetFolderPath('Desktop'), 'Roblox Account Manager.lnk'))",
-    "$s.TargetPath = 'wscript.exe'",
-    `$s.Arguments = '"${q(HIDDEN_LAUNCHER)}"'`,
-    `$s.WorkingDirectory = '${q(ROOT)}'`,
+    `$s.TargetPath = '${q(PACKAGED_EXE || 'wscript.exe')}'`,
+    `$s.Arguments = '${PACKAGED_EXE ? '' : `"${q(HIDDEN_LAUNCHER)}"`}'`,
+    `$s.WorkingDirectory = '${q(PACKAGED_EXE ? path.dirname(PACKAGED_EXE) : ROOT)}'`,
     "$s.Description = 'Isa''s Roblox Account Manager'",
-    fs.existsSync(icon) ? `$s.IconLocation = '${q(icon)},0'` : '',
+    PACKAGED_EXE || fs.existsSync(icon) ? `$s.IconLocation = '${q(PACKAGED_EXE || icon)},0'` : '',
     '$s.Save()',
   ].filter(Boolean).join('; ');
   execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(lines, 'utf16le').toString('base64')], { windowsHide: true, stdio: 'ignore' });
