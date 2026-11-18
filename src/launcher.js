@@ -118,7 +118,17 @@ function versionDirs() {
   return out.sort((a, b) => b.mtime - a.mtime);
 }
 
-function detectRoblox(override) {
+function detectRoblox(override, testClientPath) {
+  if (testClientPath) {
+    if (typeof testClientPath !== 'string' || !path.isAbsolute(testClientPath) ||
+        path.basename(testClientPath).toLowerCase() !== 'robloxplayerbeta.exe') return null;
+    try {
+      if (fs.statSync(testClientPath).isFile()) {
+        return { path: testClientPath, via: 'test executable', direct: true, testBuild: true };
+      }
+    } catch { /* missing or unreadable */ }
+    return null;
+  }
   if (override && fs.existsSync(override)) return { path: override, via: 'settings' };
   for (const key of ['HKCU\\Software\\Classes\\roblox-player\\shell\\open\\command', 'HKCR\\roblox-player\\shell\\open\\command']) {
     const p = regDefault(key);
@@ -165,7 +175,12 @@ function pickUpToDate(current, dirs) {
  * through RobloxPlayerLauncher.exe. This does NOT keep Roblox on an old version: the game client
  * checks its own version at startup and runs RobloxPlayerInstaller.exe itself when it is outdated.
  */
-async function resolveRoblox(override, { skipUpdateCheck = true, neverUpdate = false, fetchImpl, dirs } = {}) {
+async function resolveRoblox(override, { testClientPath = '', skipUpdateCheck = true, neverUpdate = false, fetchImpl, dirs } = {}) {
+  if (testClientPath) {
+    const pinned = detectRoblox(override, testClientPath);
+    if (pinned) return pinned;
+    throw new Error('Test Roblox executable must point to an existing RobloxPlayerBeta.exe. Update or clear the path in Settings.');
+  }
   if (override && fs.existsSync(override)) return { path: override, via: 'settings' };
   const installed = dirs || versionDirs();
   if (neverUpdate && installed.length) {
@@ -379,10 +394,11 @@ class Launcher extends EventEmitter {
     } finally { this.syncing = false; }
   }
 
-  roblox() { return detectRoblox(this.settings.get('robloxPath')); }
+  roblox() { return detectRoblox(this.settings.get('robloxPath'), this.settings.get('testClientPath')); }
   /** Used for launching: may skip the launcher's update check when the client is current. */
   resolveRoblox() {
     return resolveRoblox(this.settings.get('robloxPath'), {
+      testClientPath: this.settings.get('testClientPath'),
       skipUpdateCheck: this.settings.get('skipUpdateCheck'),
       neverUpdate: this.settings.get('neverUpdateRoblox'),
     });
@@ -437,16 +453,17 @@ class Launcher extends EventEmitter {
     const name = acc.username;
     const existing = this.byAccount(accountId);
     const mode = opts.replace ? 'replace' : this.settings.get('onAlreadyRunning');
-    if (existing.length) {
-      if (mode === 'skip') { log.info(`${name} already running; skipped`); return { pid: existing[0].pid, skipped: true }; }
-      if (mode === 'replace') {
-        log.info(`${name} already running; closing old client first`);
-        await this.kill(existing.map((i) => i.pid), 'replaced');
-        await sleep(1500);
-      }
+    if (existing.length && mode === 'skip') {
+      log.info(`${name} already running; skipped`);
+      return { pid: existing[0].pid, skipped: true };
     }
     const rbx = await this.resolveRoblox();
     if (!rbx) throw new Error('Roblox is not installed (could not find RobloxPlayerBeta / roblox-player handler)');
+    if (existing.length && mode === 'replace') {
+      log.info(`${name} already running; closing old client first`);
+      await this.kill(existing.map((i) => i.pid), 'replaced');
+      await sleep(1500);
+    }
     if (this.settings.get('multiInstance')) {
       await this.applyMulti();
       // Without the lock, starting another client would silently close the running ones.
@@ -473,10 +490,23 @@ class Launcher extends EventEmitter {
     const before = new Set((await this.helper.procs()).map((p) => p.pid));
     log.info(`launching ${name} -> ${target.label || target.type} (${reason}) via ${rbx.via}`);
     try {
-      const child = spawn(rbx.path, [uri], { detached: true, stdio: 'ignore', windowsHide: false });
+      const child = spawn(rbx.path, [uri], { detached: true, stdio: 'ignore', windowsHide: false,
+        ...(rbx.testBuild ? { cwd: path.dirname(rbx.path) } : {}),
+      });
+      if (rbx.testBuild) {
+        await new Promise((resolve, reject) => {
+          child.once('spawn', resolve);
+          child.once('error', reject);
+        });
+      }
       child.on('error', (e) => log.error('spawn error: ' + e.message));
       child.unref();
     } catch (e) {
+      if (rbx.testBuild) {
+        this.btids.delete(btid);
+        this.persist();
+        throw new Error(`Could not start the Roblox test executable (${e.message})`, { cause: e });
+      }
       log.warn(`direct spawn failed (${e.message}); falling back to protocol handler`);
       spawn('rundll32.exe', ['url.dll,FileProtocolHandler', uri], { detached: true, stdio: 'ignore' }).unref();
     }

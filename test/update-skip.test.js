@@ -73,3 +73,23 @@ test('neverUpdate starts the installed client directly, even when outdated', asy
   const none = await resolveRoblox('', { neverUpdate: true, fetchImpl: fakeFetch({ clientVersionUpload: CURRENT }), dirs: [] });
   assert.ok(!none || !none.pinned, 'nothing installed -> normal launcher so Roblox can be installed');
 });
+
+test('a test build takes precedence over the override and normal version selection', async (t) => {
+  const folder = fs.mkdtempSync(path.join(os.tmpdir(), 'iram-client-'));
+  t.after(() => fs.rmSync(folder, { recursive: true, force: true }));
+  const testClientPath = path.join(folder, 'RobloxPlayerBeta.exe');
+  const override = path.join(folder, 'RobloxPlayerLauncher.exe');
+  fs.writeFileSync(testClientPath, '');
+  fs.writeFileSync(override, '');
+  const fetchImpl = t.mock.fn(async () => { throw new Error('unexpected version check'); });
+  const result = await resolveRoblox(override, { testClientPath, dirs, fetchImpl, neverUpdate: true });
+  assert.equal(result.path, testClientPath);
+  assert.equal(result.testBuild, true);
+  assert.equal(fetchImpl.mock.callCount(), 0);
+
+  fs.unlinkSync(testClientPath);
+  await assert.rejects(resolveRoblox(override, { testClientPath, dirs, fetchImpl }), /Test Roblox executable/);
+  await assert.rejects(resolveRoblox(override, { testClientPath: override, dirs, fetchImpl }), /Test Roblox executable/);
+  assert.equal((await resolveRoblox(override, { testClientPath: '', dirs, fetchImpl })).path, override);
+  assert.equal(fetchImpl.mock.callCount(), 0);
+});

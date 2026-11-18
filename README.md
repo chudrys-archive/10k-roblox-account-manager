@@ -46,6 +46,14 @@ With x64 Node.js 22 or later installed, run `./tools/build-exe.ps1` from PowerSh
 | **Utilities** | Groups, aliases, descriptions, custom key/value fields, search and sort, friend the selected accounts with each other, export cookies, and open a browser logged in as any account (cookie changes in that browser are synced back). |
 | **Local API** | Off by default, with an optional password. Endpoints: `GET /api/accounts`, `/api/status`, `/api/launch?account=NAME&placeId=ID[&jobId=]`, `/api/kill?account=`, `/api/keepalive?account=&placeId=&enabled=true`, `/api/field?account=&key=[&value=]`, and `/api/cookie?account=` (only if explicitly allowed and a password is set). |
 
+## Test an older Roblox Player build
+
+1. Keep a separate copy of the complete `version-…` folder for the build you want to test. Keep its files together so the executable can find its dependencies.
+2. In the manager, open **Settings → Launching**. Set **Test Roblox executable** to the full path to that copy's `RobloxPlayerBeta.exe` and save.
+3. Launch an account. The manager starts the selected executable directly, including for keep-alive retries. If that copy is missing or fails to start, the manager reports the error and skips the Windows protocol fallback. Clear the setting when you're done.
+
+The manager's version check and launcher selection are separate from Roblox Player's own update checks. The selected player can still start its updater or be refused an online join with [Roblox error 280](https://en.help.roblox.com/hc/en-us/articles/36792120219284-Error-Code-280-Your-version-of-Roblox-may-be-out-of-date-Please-update-Roblox-and-try-again). To inspect an older build's startup without downloads, use an offline VM with a copy of the version folder. In supported editions of Windows, you can use [Windows Sandbox with networking disabled](https://learn.microsoft.com/en-us/windows/security/application-security/application-isolation/windows-sandbox/windows-sandbox-configure-using-wsb-file). The manager's normal account launch requires a live Roblox authentication ticket.
+
 ## About captchas
 
 This manager does **not** auto-solve or bypass Roblox's captcha. It doesn't need to for unattended play:

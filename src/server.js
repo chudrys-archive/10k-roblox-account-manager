@@ -170,7 +170,9 @@ class Server {
       antiAfk: antiAfk.publicView(),
       settings: settings.publicView(),
       browsers: browser.list(),
-      roblox: this.robloxInfo || (this.robloxInfo = detectRoblox(settings.get('robloxPath'))),
+      roblox: settings.get('testClientPath')
+        ? detectRoblox('', settings.get('testClientPath'))
+        : this.robloxInfo || (this.robloxInfo = detectRoblox(settings.get('robloxPath'))),
       browserFound: !!findBrowser(settings.get('browserPath')),
       apiUrl: `http://127.0.0.1:${this.port}/api/`,
     };
