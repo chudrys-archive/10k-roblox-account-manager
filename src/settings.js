@@ -17,7 +17,7 @@ const DEFAULTS = {
   onAlreadyRunning: 'replace', // 'replace' | 'skip' | 'allow'
   robloxPath: '',              // blank = auto-detect (registry handler / Versions folder)
   testClientPath: '',          // exact RobloxPlayerBeta.exe for compatibility testing
-  neverUpdateRoblox: false,    // start the newest installed client directly, never via the launcher (the client can still update itself)
+  neverUpdateRoblox: false,    // "Don't update Roblox": start the installed client directly and disable Roblox's updater
   skipUpdateCheck: true,       // launch RobloxPlayerBeta.exe directly when the installed version is current
   renameWindows: true,
   windowTitle: '{name}',       // {name} {username} {alias} {userId} {group}

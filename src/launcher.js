@@ -172,8 +172,7 @@ function pickUpToDate(current, dirs) {
  * Like detectRoblox, but when skipUpdateCheck is on and the installed client is current,
  * returns RobloxPlayerBeta.exe directly so the launcher's update check is skipped.
  * With neverUpdate on, always returns the newest installed RobloxPlayerBeta.exe without going
- * through RobloxPlayerLauncher.exe. This does NOT keep Roblox on an old version: the game client
- * checks its own version at startup and runs RobloxPlayerInstaller.exe itself when it is outdated.
+ * through the launcher. The client's own updater is disabled separately (setUpdatersBlocked).
  */
 async function resolveRoblox(override, { testClientPath = '', skipUpdateCheck = true, neverUpdate = false, fetchImpl, dirs } = {}) {
   if (testClientPath) {
@@ -189,7 +188,7 @@ async function resolveRoblox(override, { testClientPath = '', skipUpdateCheck = 
     try {
       const current = await currentRobloxVersion({ fetchImpl });
       if (current.toLowerCase() !== version.toLowerCase()) {
-        log.warn(`starting ${version} (current is ${current}); the Roblox client will update itself when it starts`);
+        log.warn(`starting ${version} (current is ${current}); updates are blocked, so Roblox may refuse the join (error 280)`);
       }
     } catch { /* the check is informational only; launch anyway */ }
     return { path: pinned.exe, via: `${version} (launcher skipped)`, direct: true, pinned: true };
@@ -205,6 +204,51 @@ async function resolveRoblox(override, { testClientPath = '', skipUpdateCheck = 
     }
   }
   return detectRoblox(override);
+}
+
+// ---------------- don't update Roblox ----------------
+// RobloxPlayerBeta.exe checks its own version when it starts and, when it is outdated, runs the
+// RobloxPlayerInstaller.exe next to it (older installs: RobloxPlayerLauncher.exe) to update.
+// With "Don't update Roblox" on we rename those updaters inside every Player version folder so the
+// client has nothing to run, and close any updater process that starts anyway (e.g. a fresh copy
+// downloaded to %TEMP%). Turning the setting off renames them back.
+const UPDATER_NAMES = ['RobloxPlayerInstaller.exe', 'RobloxPlayerLauncher.exe'];
+const BLOCKED_SUFFIX = '.iram-blocked';
+
+/**
+ * Block (enabled=true) or restore (enabled=false) Roblox's updaters in the given version folders.
+ * Returns {changed, failed}.
+ */
+function setUpdatersBlocked(enabled, dirs = versionDirs()) {
+  let changed = 0;
+  const failed = [];
+  for (const d of dirs) {
+    for (const name of UPDATER_NAMES) {
+      const live = path.join(d.dir, name);
+      const blocked = live + BLOCKED_SUFFIX;
+      const [from, to] = enabled ? [live, blocked] : [blocked, live];
+      if (!fs.existsSync(from)) continue;
+      try {
+        if (fs.existsSync(to)) fs.rmSync(to, { force: true });
+        fs.renameSync(from, to);
+        changed++;
+      } catch (e) { failed.push(`${from}: ${e.code || e.message}`); }
+    }
+  }
+  return { changed, failed };
+}
+
+/** Close running Roblox updater processes (best effort). Resolves to how many were closed. */
+function killUpdaters() {
+  return new Promise((resolve) => {
+    const args = ['/F', ...UPDATER_NAMES.flatMap((n) => ['/IM', n])];
+    let p;
+    try { p = spawn('taskkill.exe', args, { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true }); } catch { return resolve(0); }
+    let out = '';
+    p.stdout.on('data', (b) => { out += b; });
+    p.on('error', () => resolve(0));
+    p.on('close', () => resolve((out.match(/SUCCESS/gi) || []).length));
+  });
 }
 
 // ---------------- launcher ----------------
@@ -230,9 +274,11 @@ class Launcher extends EventEmitter {
     for (const [k, v] of saved.btids || []) this.btids.set(k, v);
     for (const i of saved.instances || []) this.instances.set(i.pid, i);
     await this.applyMulti();
+    this.applyUpdateBlock();
     await this.sync();
     this.settings.on('change', () => {
       this.applyMulti().catch(() => {});
+      this.applyUpdateBlock();
       try { this.applyFFlags(this.roblox()?.path); } catch (e) { log.warn('FFlags: ' + e.message); }
     });
     this.timer = setInterval(() => this.sync().catch((e) => log.debug('sync: ' + e.message)), 3000);
@@ -317,6 +363,10 @@ class Launcher extends EventEmitter {
     this.syncing = true;
     try {
       await this.applyMulti().catch((e) => log.debug('applyMulti: ' + e.message));
+      if (this.settings.get('neverUpdateRoblox')) {
+        const n = await killUpdaters();
+        if (n) log.warn(`closed ${n} Roblox updater process(es) ("Don't update Roblox" is on)`);
+      }
       const procs = await this.helper.procs();
       const live = new Map(procs.map((p) => [p.pid, p]));
       let changed = false;
@@ -392,6 +442,16 @@ class Launcher extends EventEmitter {
       if (changed) this.persist();
       this.emit('change');
     } finally { this.syncing = false; }
+  }
+
+  /** Keep Roblox's own updaters disabled while "Don't update Roblox" is on; restore them when it is off. */
+  applyUpdateBlock() {
+    const want = !!this.settings.get('neverUpdateRoblox');
+    if (!want && this.updatesBlocked === false) return; // already restored
+    const { changed, failed } = setUpdatersBlocked(want);
+    if (changed) log.info(want ? `blocked Roblox's updater in ${changed} place(s)` : `restored Roblox's updater in ${changed} place(s)`);
+    for (const f of failed) log.warn(`could not ${want ? 'block' : 'restore'} Roblox updater ${f}`);
+    this.updatesBlocked = want;
   }
 
   roblox() { return detectRoblox(this.settings.get('robloxPath'), this.settings.get('testClientPath')); }
@@ -473,6 +533,10 @@ class Launcher extends EventEmitter {
       }
     }
     this.applyFFlags(rbx.path);
+    if (this.settings.get('neverUpdateRoblox')) {
+      this.applyUpdateBlock(); // a version folder may have been installed since startup
+      if (rbx.testBuild) setUpdatersBlocked(true, [{ dir: path.dirname(rbx.path) }]);
+    }
 
     const session = this.accounts.session(acc);
     let ticket;
@@ -710,4 +774,4 @@ class Launcher extends EventEmitter {
   stop() { clearInterval(this.timer); this.persist(); }
 }
 
-module.exports = { Launcher, resolveTarget, placeLauncherUrl, launchUri, detectRoblox, resolveRoblox, pickUpToDate, currentRobloxVersion, resetVersionCache };
+module.exports = { Launcher, resolveTarget, placeLauncherUrl, launchUri, detectRoblox, resolveRoblox, pickUpToDate, currentRobloxVersion, resetVersionCache, setUpdatersBlocked, BLOCKED_SUFFIX };

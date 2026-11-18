@@ -93,3 +93,21 @@ test('a test build takes precedence over the override and normal version selecti
   assert.equal((await resolveRoblox(override, { testClientPath: '', dirs, fetchImpl })).path, override);
   assert.equal(fetchImpl.mock.callCount(), 0);
 });
+
+test("Don't update Roblox disables the client's updaters and restores them when turned off", async (t) => {
+  const { setUpdatersBlocked, BLOCKED_SUFFIX } = require("../src/launcher");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "iram-version-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  for (const f of ["RobloxPlayerBeta.exe", "RobloxPlayerInstaller.exe"]) fs.writeFileSync(path.join(dir, f), f);
+  const installer = path.join(dir, "RobloxPlayerInstaller.exe");
+
+  assert.deepEqual(setUpdatersBlocked(true, [{ dir }]), { changed: 1, failed: [] });
+  assert.ok(!fs.existsSync(installer), "installer can no longer be started");
+  assert.ok(fs.existsSync(installer + BLOCKED_SUFFIX));
+  assert.ok(fs.existsSync(path.join(dir, "RobloxPlayerBeta.exe")), "the game client is untouched");
+  assert.equal(setUpdatersBlocked(true, [{ dir }]).changed, 0, "blocking twice is a no-op");
+
+  assert.equal(setUpdatersBlocked(false, [{ dir }]).changed, 1);
+  assert.equal(fs.readFileSync(installer, "utf8"), "RobloxPlayerInstaller.exe", "restored intact");
+  assert.ok(!fs.existsSync(installer + BLOCKED_SUFFIX));
+});
