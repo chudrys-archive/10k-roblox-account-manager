@@ -118,9 +118,9 @@ async function main() {
   if (settings.get('openUiOnStart') && !noUi) openUi(url, settings);
 
   let stopping = false;
-  const shutdown = async (sig) => {
+  const shutdown = async (sig, { closeClients = false } = {}) => {
     if (stopping) return; stopping = true;
-    log.info(`shutting down (${sig})`);
+    log.info(`shutting down (${sig}${closeClients ? ', closing Roblox clients' : ''})`);
     watchdog.stop();
     antiAfk.stop();
     logwatch.stop();
@@ -128,7 +128,9 @@ async function main() {
     accounts.saveNow();
     await browser.closeAll().catch(() => {});
     server.close();
-    helper.stop();
+    // stop background processes too: Roblox clients (if asked), the lock holder, the window helper
+    await launcher.stopBackground({ closeClients }).catch((e) => log.warn('stop background: ' + e.message));
+    await helper.stop();
     try { if (readJson(LOCK, {}).pid === process.pid) fs.rmSync(LOCK, { force: true }); } catch {}
     setTimeout(() => process.exit(0), 300);
   };

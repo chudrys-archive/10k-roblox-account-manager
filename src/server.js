@@ -305,8 +305,9 @@ class Server {
     this.route('POST', '/ui/antiafk/now', async () => ({ nudged: await c.antiAfk.tick(true) }));
     this.route('POST', '/ui/alerts/test', async () => { await c.alerts.test(); }, { allowLocked: true });
     this.route('POST', '/ui/shortcut', () => { c.createShortcut(); }, { allowLocked: true });
-    this.route('POST', '/ui/quit', () => {
-      setTimeout(() => c.shutdown('quit from UI'), 200);
+    this.route('POST', '/ui/quit', ({ body }) => {
+      const closeClients = !!(body && body.closeClients);
+      setTimeout(() => c.shutdown('quit from UI', { closeClients }), 200);
       return { ok: true };
     }, { allowLocked: true });
     this.route('POST', '/ui/game-info', async ({ body }) => {

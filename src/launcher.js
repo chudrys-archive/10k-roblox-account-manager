@@ -755,6 +755,36 @@ class Launcher extends EventEmitter {
     return n;
   }
 
+  /**
+   * Quit support: optionally close every Roblox client, then stop the multi-instance lock holder
+   * when no client is left to protect. With clients still running the holder must stay, or the
+   * clients would close each other; it then exits on its own once the last client closes.
+   * Returns {clientsLeft, lockHolder: 'stopped' | 'kept' | 'not running'}.
+   */
+  async stopBackground({ closeClients = false } = {}) {
+    if (closeClients) {
+      try { await this.killAll(true); } catch (e) { log.warn('close clients on quit: ' + e.message); }
+      for (let i = 0; i < 10; i++) {
+        const left = await this.helper.procs().catch(() => []);
+        if (!left.length) break;
+        await sleep(300);
+      }
+    }
+    const procs = await this.helper.procs().catch(() => null);
+    const clientsLeft = procs ? procs.length : null;
+    let s = this.lockStatus();
+    if (!s) return { clientsLeft, lockHolder: 'not running' };
+    if (clientsLeft !== 0) {
+      log.info(`lock holder kept running to protect ${clientsLeft ?? 'running'} Roblox client(s); it exits after the last one closes`);
+      return { clientsLeft, lockHolder: 'kept' };
+    }
+    try { fs.writeFileSync(LOCK_STOP, '1'); } catch {}
+    for (let i = 0; i < 20 && s; i++) { await sleep(250); s = this.lockStatus(); }
+    if (s) { try { process.kill(s.pid); } catch {} }
+    log.info('lock holder stopped');
+    return { clientsLeft, lockHolder: 'stopped' };
+  }
+
   async killAll(includeUnknown = true) {
     const pids = [...this.instances.keys(), ...(includeUnknown ? this.unknown.map((u) => u.pid) : [])];
     return this.kill(pids, 'close all');

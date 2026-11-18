@@ -128,11 +128,15 @@ function openDialog(html, { wide = false } = {}) {
 }
 function closeDialog() { $('#dialog')?.remove(); }
 
-function confirmDialog(title, text, { ok = 'Confirm', danger = false } = {}) {
+function confirmDialog(title, text, { ok = 'Confirm', danger = false, check = '' } = {}) {
   return new Promise((resolve) => {
     const d = openDialog(`<h2>${esc(title)}</h2><p class="lead">${esc(text)}</p>
+      ${check ? `<label class="check" style="display:flex;gap:8px;align-items:center;margin-top:10px"><input type="checkbox" id="cf-check"> ${esc(check)}</label>` : ''}
       <div class="foot"><button class="btn" data-close>Cancel</button><button class="btn ${danger ? 'danger' : 'primary'}" id="cf-ok">${esc(ok)}</button></div>`);
-    $('#cf-ok', d).addEventListener('click', () => { closeDialog(); resolve(true); });
+    $('#cf-ok', d).addEventListener('click', () => {
+      const checked = !!$('#cf-check', d)?.checked;
+      closeDialog(); resolve(check ? { checked } : true);
+    });
     const obs = new MutationObserver(() => { if (!document.body.contains(d)) { obs.disconnect(); resolve(false); } });
     obs.observe(document.body, { childList: true });
     setTimeout(() => $('#cf-ok', d)?.focus(), 30);
@@ -639,8 +643,13 @@ $('#btn-theme').addEventListener('click', () => {
 });
 bind($('#btn-quit'), async () => {
   const ka = S.accounts.filter((a) => a.keepAlive.enabled).length;
-  if (!await confirmDialog('Quit the manager?', `Your Roblox clients keep running, but keep-alive, anti-AFK and alerts stop until you start it again.${ka ? ` (${ka} account(s) use keep-alive.)` : ''}`, { ok: 'Quit' })) return;
-  await call('/ui/quit', {});
+  const clients = S.launcher.instances.length + S.launcher.unknown.length;
+  const text = 'Quitting stops the manager and all of its background processes.' +
+    (clients ? ` Your ${clients} Roblox client(s) keep running unless you close them below (keep-alive, anti-AFK and alerts stop until you start the manager again).` : '') +
+    (ka ? ` (${ka} account(s) use keep-alive.)` : '');
+  const r = await confirmDialog('Quit the manager?', text, { ok: 'Quit', check: clients ? `Also close ${clients} Roblox client(s)` : '' });
+  if (!r) return;
+  await call('/ui/quit', { closeClients: !!(r && r.checked) });
   document.body.innerHTML = '<div class="lock"><div class="card" style="text-align:center;width:360px"><div class="logo" style="margin:0 auto 14px">IR</div><h2 style="margin:0 0 6px">Manager stopped</h2><p class="muted">Start it again with the desktop shortcut or "Start Manager.vbs". You can close this window.</p></div></div>';
 });
 bind($('#btn-afk-now'), async () => { const r = await call('/ui/antiafk/now', {}); toast('ok', r.nudged ? `Nudged ${r.nudged} client(s)` : 'No clients to nudge'); });

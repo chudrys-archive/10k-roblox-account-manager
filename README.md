@@ -13,7 +13,7 @@ To move existing accounts from the source version, quit both versions and copy `
 1. Install Node.js 22+ (already present on this PC: v24).
 2. Double-click **`Start Manager.vbs`**, which runs without a console window. `start.bat` does the same but shows a console with live output. In Settings → App you can add a desktop shortcut.
 
-Starting it again while it's running just reopens the window. Quit from the sidebar; your Roblox clients keep running.
+Starting it again while it's running just reopens the window. Quit from the sidebar. Quitting stops the manager and all of its background processes; your Roblox clients keep running unless you tick **Also close Roblox clients**.
 
 ### Build a Windows executable
 
@@ -33,7 +33,7 @@ With x64 Node.js 22 or later installed, run `./tools/build-exe.ps1` from PowerSh
 | **Fast kick detection** | The manager reads each client's own Roblox log, matched by its unique launch tag so it can't mix clients up. It knows the exact server a client joined and spots kicks and lost connections within seconds. A client stuck on Roblox's "Disconnected" screen is restarted after 25 s instead of after minutes of presence checks. Teleports, which reconnect within seconds, are ignored. On "same account launched elsewhere" (code 264/273) keep-alive pauses instead of fighting the other session. Roblox presence remains as a fallback. |
 | **Audio** | Mute all clients, or let only the focused client play sound (Windows volume mixer, per process). Per-account overrides: always muted / never muted. |
 | **Discord alerts** | Webhook alerts for crash, kick/disconnect, signed-in-elsewhere, login expired/moderated, relaunch limit reached and (optional) launch failures. Per-account cooldown and Discord rate-limit handling, so a looping problem can't spam the channel. Includes a test button. |
-| **Runs in the background** | `Start Manager.vbs` / the desktop shortcut (Settings → App) start it with no console window. Quit from the sidebar. Optional start with Windows. Quitting or crashing never closes your Roblox clients. |
+| **Runs in the background** | `Start Manager.vbs` / the desktop shortcut (Settings → App) start it with no console window. Quit from the sidebar. Optional start with Windows. Quitting stops every background process the manager started: `node.exe`, the window helper and the multi-instance lock holder. The lock holder is the one exception while Roblox clients are still open, because without it they would close each other; it exits by itself after the last one closes. Ending the `.exe` in Task Manager also ends its `node.exe`. Quitting or crashing never closes your Roblox clients unless you ask it to. |
 | **Restart / Rejoin / Server hop** | Restart relaunches into the same server (no keep-alive needed). Rejoin (launch with an empty target) sends each account back to its last game. Server hop moves an account to a different open server (or the emptiest one), and keep-alive follows it. |
 | **Performance** | Set client CPU priority (Normal / Below normal / Idle). Periodic memory trim (in testing, 3 clients went from 3.9 GB to 0.5 GB of working memory). FPS cap. All apply live to running clients. |
 | **Favorites** | Save games and servers with name and icon; launch the selection into one with a single click. |

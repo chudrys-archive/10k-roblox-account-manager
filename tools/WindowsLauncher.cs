@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.IO;
 using System.IO.Compression;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Windows.Forms;
 
@@ -37,6 +38,7 @@ internal static class WindowsLauncher
             startInfo.EnvironmentVariables["IRAM_LAUNCHER_EXE"] = assembly.Location;
             using (var process = Process.Start(startInfo))
             {
+                KillWithThisProcess(process);
                 process.WaitForExit();
                 if (process.ExitCode == 0) return 0;
                 throw new InvalidOperationException(
@@ -49,6 +51,79 @@ internal static class WindowsLauncher
             MessageBox.Show(error.Message, "Isa's Roblox Account Manager",
                 MessageBoxButtons.OK, MessageBoxIcon.Error);
             return 1;
+        }
+    }
+
+    // ---- job object: ending this exe (even from Task Manager) also ends node.exe ----
+    // KILL_ON_JOB_CLOSE ends node.exe when our handle closes, which Windows does when this process
+    // exits for any reason. SILENT_BREAKAWAY_OK keeps node's own children (Roblox clients, the
+    // multi-instance lock holder, the window helper) out of the job, so Roblox games are never killed;
+    // the window helper exits by itself when node's pipe closes.
+    private static IntPtr job = IntPtr.Zero;
+    private const int JobObjectExtendedLimitInformation = 9;
+    private const uint JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK = 0x1000;
+    private const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct JOBOBJECT_BASIC_LIMIT_INFORMATION
+    {
+        public long PerProcessUserTimeLimit;
+        public long PerJobUserTimeLimit;
+        public uint LimitFlags;
+        public UIntPtr MinimumWorkingSetSize;
+        public UIntPtr MaximumWorkingSetSize;
+        public uint ActiveProcessLimit;
+        public UIntPtr Affinity;
+        public uint PriorityClass;
+        public uint SchedulingClass;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct IO_COUNTERS
+    {
+        public ulong ReadOperationCount, WriteOperationCount, OtherOperationCount;
+        public ulong ReadTransferCount, WriteTransferCount, OtherTransferCount;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+    {
+        public JOBOBJECT_BASIC_LIMIT_INFORMATION BasicLimitInformation;
+        public IO_COUNTERS IoInfo;
+        public UIntPtr ProcessMemoryLimit;
+        public UIntPtr JobMemoryLimit;
+        public UIntPtr PeakProcessMemoryUsed;
+        public UIntPtr PeakJobMemoryUsed;
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr CreateJobObject(IntPtr attributes, string name);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool SetInformationJobObject(IntPtr job, int infoClass,
+        ref JOBOBJECT_EXTENDED_LIMIT_INFORMATION info, int length);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+
+    private static void KillWithThisProcess(Process process)
+    {
+        try
+        {
+            job = CreateJobObject(IntPtr.Zero, null);
+            if (job == IntPtr.Zero) return;
+            var info = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION();
+            info.BasicLimitInformation.LimitFlags =
+                JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK;
+            if (SetInformationJobObject(job, JobObjectExtendedLimitInformation, ref info,
+                    Marshal.SizeOf(typeof(JOBOBJECT_EXTENDED_LIMIT_INFORMATION))))
+            {
+                AssignProcessToJobObject(job, process.Handle);
+            }
+        }
+        catch (Exception)
+        {
+            // best effort: without the job the manager still works, it just is not ended with us
         }
     }
 

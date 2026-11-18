@@ -102,10 +102,16 @@ class WinHelper extends EventEmitter {
     return Array.isArray(r) ? r : (r ? [r] : []);
   }
 
+  /** Ends the helper process. Resolves once it has exited (it is killed after 1.5 s). */
   stop() {
     this.stopping = true;
-    try { this.proc?.stdin.end(); } catch {}
-    setTimeout(() => { try { this.proc?.kill(); } catch {} }, 1500).unref();
+    const p = this.proc;
+    if (!p || p.exitCode !== null) return Promise.resolve();
+    return new Promise((resolve) => {
+      const t = setTimeout(() => { try { p.kill(); } catch {} resolve(); }, 1500);
+      p.once('exit', () => { clearTimeout(t); resolve(); });
+      try { p.stdin.end(); } catch { try { p.kill(); } catch {} }
+    });
   }
 }
 
