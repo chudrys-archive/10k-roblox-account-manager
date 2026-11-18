@@ -1,4 +1,4 @@
-# Isa's Roblox Account Manager
+# 10k's Roblox Account Manager
 
 A from-scratch, zero-dependency Roblox multi-account manager for Windows. It's a Node.js service plus a local web UI that opens in its own Edge app window.
 
