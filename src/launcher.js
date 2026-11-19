@@ -532,6 +532,9 @@ class Launcher extends EventEmitter {
     const acc = this.accounts.get(accountId);
     if (!acc) throw new Error('account no longer exists');
     const name = acc.username;
+    if (acc.status === 'verify') {
+      throw Object.assign(new Error(`${name} needs verification: open it in the browser, complete the check, then click Validate`), { verification: true });
+    }
     const existing = this.byAccount(accountId);
     const mode = opts.replace ? 'replace' : this.settings.get('onAlreadyRunning');
     if (existing.length && mode === 'skip') {
@@ -562,6 +565,7 @@ class Launcher extends EventEmitter {
     const session = this.accounts.session(acc);
     let ticket;
     try { ticket = await api.getAuthTicket(session); } catch (e) {
+      if (e && e.verification) this.accounts.markVerification(acc, 'sign-in ticket');
       if (e instanceof RobloxError && e.status === 401) {
         this.accounts.setStatus(acc, 'invalid', 'Cookie expired or revoked - re-login needed'); this.accounts.save();
       }

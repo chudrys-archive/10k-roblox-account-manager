@@ -263,6 +263,7 @@ function renderStats() {
   const acc = S.accounts;
   const valid = acc.filter((a) => a.status === 'valid').length;
   const bad = acc.filter((a) => a.status === 'invalid' || a.status === 'banned').length;
+  const verify = acc.filter((a) => a.status === 'verify').length;
   const inst = S.launcher.instances;
   const mem = inst.reduce((s, i) => s + (i.memMB || 0), 0);
   const ka = acc.filter((a) => a.keepAlive.enabled);
@@ -272,7 +273,7 @@ function renderStats() {
   const afkVal = !afk.enabled ? 'Off' : afk.nextDue ? fmtIn(afk.nextDue) : 'Idle';
   const afkHint = !afk.enabled ? 'clients may be kicked after 20 min' : afk.status || (afk.nextDue ? 'until next nudge' : 'no clients running');
   const cards = [
-    ['users', 'Accounts', acc.length, `${valid} valid${bad ? ` · <span class="err">${bad} need login</span>` : ''}`],
+    ['users', 'Accounts', acc.length, `${valid} valid${bad ? ` · <span class="err">${bad} need login</span>` : ''}${verify ? ` · <span class="err">${verify} need verification</span>` : ''}`],
     ['play', 'Running', inst.length, inst.length ? `${(mem / 1024).toFixed(1)} GB RAM · queue ${S.launcher.queued.length}` : `queue ${S.launcher.queued.length}`],
     ['shield', 'Keep-alive', ka.length, kaIssues ? `<span style="color:var(--warn)">${kaIssues} recovering</span>` : 'all healthy'],
     ['zap', 'Anti-AFK', afkVal, esc(afkHint)],
@@ -329,7 +330,11 @@ function clientCell(a) {
   const qi = S.launcher.queued.indexOf(a.id);
   if (qi === 0) return '<span class="badge queued">Launching…</span>';
   if (qi > 0) return `<span class="badge queued qpos">Queued #${qi}</span>`;
-  return `<div class="client"><span class="muted">Offline</span><span class="loc muted">last played ${fmtAgo(a.lastUsedAt)}</span></div>`;
+  if (a.status === 'verify') return '<div class="client"><span class="badge verify">needs verification</span><span class="loc muted">client closed · verify in browser, then Validate</span></div>';
+  const pr = a.presence;
+  const prTxt = pr ? ['Offline', 'Online', 'In game', 'In Studio', 'Invisible'][pr.type] || 'Offline' : 'Offline';
+  const prLoc = pr && pr.type === 2 && pr.location ? `${pr.location} (elsewhere)` : `last played ${fmtAgo(a.lastUsedAt)}`;
+  return `<div class="client"><span class="muted" title="Live presence from Roblox">${esc(prTxt)}</span><span class="loc muted">${esc(prLoc)}</span></div>`;
 }
 
 function kaCell(a) {
@@ -358,7 +363,7 @@ function renderTable() {
       <td><div class="acc"><div class="avatar">${a.avatarUrl ? `<img src="${esc(a.avatarUrl)}" alt="" loading="lazy">` : `<div class="ph">${initials}</div>`}<span class="st ${inst ? 'on' : queued ? 'busy' : ''}"></span></div>
         <div style="min-width:0"><div class="nm">${esc(nameOf(a))}</div><div class="meta">${esc(a.alias ? a.username : a.displayName)} · ${a.userId}${a.description ? ' · ' + esc(a.description) : ''}</div></div></div></td>
       <td><span class="tag">${esc(a.group)}</span></td>
-      <td><span class="badge ${esc(a.status)}" title="${esc(a.statusMsg || 'checked ' + fmtAgo(a.lastValidatedAt))}">${esc(a.status === 'invalid' ? 'login needed' : a.status)}</span></td>
+      <td><span class="badge ${esc(a.status)}" title="${esc(a.statusMsg || 'checked ' + fmtAgo(a.lastValidatedAt))}">${esc(a.status === 'invalid' ? 'login needed' : a.status === 'verify' ? 'needs verification' : a.status)}</span></td>
       <td>${fmtNum(a.robux)}</td>
       <td>${clientCell(a)}</td>
       <td>${kaCell(a)}</td>
@@ -626,6 +631,27 @@ bind($('#btn-launch'), () => ACT.launch(needSel()));
 bind($('#btn-ka-on'), () => ACT.keepAlive(needSel(), true));
 bind($('#btn-ka-off'), () => ACT.keepAlive(needSel(), false));
 bind($('#btn-validate'), () => ACT.validate(selIds()));
+// Cookie checker: validate cookies without adding them
+bind($('#btn-check'), async () => {
+  const d = openDialog(`<h2>Check cookies</h2><p class="lead">Paste cookies (one per line, any format that contains a .ROBLOSECURITY value). Nothing is saved unless you click Import.</p>
+    <textarea id="cc-text" rows="6" placeholder="_|WARNING:-DO-NOT-SHARE-THIS..."></textarea><div id="cc-res"></div>
+    <div class="foot"><button class="btn" data-close>Close</button><button class="btn" id="cc-import" disabled>Import valid</button><button class="btn primary" id="cc-go">Check</button></div>`);
+  let valid = [];
+  $('#cc-go', d).addEventListener('click', () => run(async () => {
+    const text = $('#cc-text', d).value;
+    $('#cc-res', d).innerHTML = '<p class="muted">Checking…</p>';
+    const rows = await call('/ui/accounts/check-cookies', { text });
+    const lines = text.split(/\r?\n/).filter((l) => /_\|WARNING|[A-F0-9]{100,}/i.test(l));
+    valid = rows.filter((r) => r.valid && r.status !== 'banned').map((r) => lines.find((l) => l.includes(r.tail))).filter(Boolean);
+    $('#cc-import', d).disabled = !valid.length;
+    $('#cc-res', d).innerHTML = `<p class="muted">${rows.filter((r) => r.valid).length} of ${rows.length} valid</p><table class="ck-table"><tr><th>#</th><th>User</th><th>Status</th><th>Created</th><th>Robux</th><th></th></tr>` +
+      rows.map((r) => `<tr><td>${r.n}</td><td>${r.valid ? `${esc(r.username || '?')} <span class="muted small">${r.userId || ''}</span>` : '<span class="err">' + esc(r.error || 'invalid') + '</span>'}</td><td>${esc(r.status)}</td><td>${r.created ? esc(new Date(r.created).toLocaleDateString()) : ''}</td><td>${r.robux ?? ''}</td><td class="muted small">${r.known ? 'already added' : ''}</td></tr>`).join('') + '</table>';
+  }));
+  $('#cc-import', d).addEventListener('click', () => run(async () => {
+    const r = await call('/ui/accounts/import', { text: valid.join('\n') });
+    toast('ok', `Imported ${r.added} new, ${r.updated} updated`); closeDialog();
+  }));
+});
 bind($('#btn-tile'), async () => { const r = await call('/ui/tile', {}); toast('ok', `Tiled ${r.tiled} window(s)`); });
 bind($('#btn-kill-all'), async () => {
   const ka = S.accounts.filter((a) => a.keepAlive.enabled).length;
@@ -934,6 +960,7 @@ const SETTINGS = [
     ['robloxPath', 'text', 'Roblox executable', 'Leave blank to auto-detect (also works with Bloxstrap/Fishstrap)'],
     ['testClientPath', 'text', 'Test Roblox executable', 'Enter the full path to an older RobloxPlayerBeta.exe to use it for launches and retries. Roblox may still request an update. Clear this field to return to normal launching.'],
     ['neverUpdateRoblox', 'bool', "Don't update Roblox", 'Keeps your installed Roblox version: starts it directly and disables Roblox\'s own updater until you turn this off. Roblox may refuse to join games on an outdated version (error 280)'],
+    ['presencePollSec', 'num', 'Live presence every (seconds)', 'Shows Online / In game for every account, also when it plays elsewhere. 0 turns it off'],
     ['skipUpdateCheck', 'bool', 'Skip update check when current', 'Starts the game directly if your installed Roblox is already the latest version. Falls back to the normal launcher (which updates) when it is not'],
   ]],
   ['Anti-AFK', 'zap', [

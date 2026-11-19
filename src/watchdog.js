@@ -120,6 +120,7 @@ class Watchdog extends EventEmitter {
       }
       if (s.issue) { s.issue = ''; s.msg = ''; } // user turned it back on
       if (!w.enabled) { this.setStatus(s, 'paused', 'Watchdog paused globally'); continue; }
+      if (acc.status === 'verify') { this.setStatus(s, 'error', 'needs verification'); continue; }
       if (acc.status === 'invalid' || acc.status === 'banned') { this.setStatus(s, 'error', acc.statusMsg || 'account unusable'); continue; }
       if (this.launcher.pending.has(acc.id)) { this.setStatus(s, 'launching'); continue; }
 

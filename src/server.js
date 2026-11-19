@@ -261,6 +261,7 @@ class Server {
       for (const id of ids(body)) c.accounts.get(id).group = String(body.group || 'Default').slice(0, 60);
       c.accounts.save();
     });
+    this.route('POST', '/ui/accounts/check-cookies', async ({ body }) => c.accounts.checkCookies(body.text || ''));
     this.route('POST', '/ui/accounts/validate', async ({ body }) => c.accounts.validateMany(ids(body)));
     this.route('POST', '/ui/accounts/:id/refresh-cookie', async ({ params }) => { await c.accounts.refreshCookie(acc(params.id)); });
     this.route('POST', '/ui/accounts/:id/browser', async ({ params, body }) => { await c.browser.openAs(acc(params.id), body.url || undefined); });

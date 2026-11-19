@@ -94,6 +94,20 @@ async function main() {
   const antiAfk = new AntiAfk({ helper, launcher, settings, accounts });
   accounts.on('invalid', (acc) => alerts.send('invalid', `${acc.username}: login needed`, `${acc.statusMsg || 'The saved session is no longer valid.'}\nRe-login from the account's Details.`, { level: 'error', key: acc.id }));
   settings.on('change', (s) => applyAutostart(s.startWithWindows));
+  // Verification lockdown: close every client of the account and label it until the person verifies.
+  accounts.on('verification', (acc, where) => {
+    const pids = launcher.byAccount(acc.id).map((i) => i.pid);
+    if (pids.length) launcher.kill(pids, 'needs verification').catch((e) => log.warn('close on verification: ' + e.message));
+    alerts.send('invalid', `${acc.username}: needs verification`, `Roblox asked this account to verify (${where}). Its client was closed and keep-alive paused. Open the account in the browser from the manager, complete the check, then click Validate.`, { level: 'error', key: acc.id, force: true });
+  });
+  logwatch.on('verification', (inst) => accounts.markVerification(accounts.get(inst.accountId), 'Roblox client'));
+  // live presence for every account (one batched request)
+  setInterval(() => {
+    const sec = settings.get('presencePollSec');
+    if (!sec || !accounts.loaded || Date.now() - (accounts.presenceAt || 0) < sec * 1000 - 500) return;
+    accounts.presenceAt = Date.now();
+    accounts.pollPresence().catch((e) => log.debug('presence poll: ' + e.message));
+  }, 5000).unref();
 
   const onUnlocked = () => {
     if (settings.get('autoValidateOnStart') && accounts.list.length) {

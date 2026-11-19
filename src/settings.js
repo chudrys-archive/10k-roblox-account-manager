@@ -9,6 +9,7 @@ const DEFAULTS = {
   port: 7963,
   openUiOnStart: true,
   autoValidateOnStart: true,
+  presencePollSec: 30,         // live presence for all accounts; 0 = off
 
   // launching
   multiInstance: true,
@@ -92,6 +93,7 @@ class Settings extends EventEmitter {
     next.port = num(next.port, 7963, 1024, 65535);
     next.launchDelaySec = num(next.launchDelaySec, 6, 0, 120);
     next.launchTimeoutSec = num(next.launchTimeoutSec, 90, 15, 600);
+    next.presencePollSec = next.presencePollSec ? num(next.presencePollSec, 30, 15, 600) : 0;
     if (typeof next.testClientPath !== 'string') throw new Error('Test Roblox executable must be a path');
     next.testClientPath = next.testClientPath.trim().replace(/^"(.*)"$/, '$1');
     next.tileColumns = num(next.tileColumns, 0, 0, 20);
