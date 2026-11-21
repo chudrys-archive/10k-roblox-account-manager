@@ -30,13 +30,14 @@ const PRESENCE = { 0: 'Offline', 1: 'Online (not in game)', 2: 'In game', 3: 'In
  * Failures back off exponentially; relaunches are capped per hour so a broken game can't loop forever.
  */
 class Watchdog extends EventEmitter {
-  constructor({ launcher, accounts, settings, logwatch, alerts }) {
+  constructor({ launcher, accounts, settings, logwatch, alerts, guard = null }) {
     super();
     this.launcher = launcher;
     this.accounts = accounts;
     this.settings = settings;
     this.logwatch = logwatch;
     this.alerts = alerts || { send() {} };
+    this.guard = guard; // CaptchaGuard: while paused, nothing is relaunched or restarted automatically
     this.state = new Map();
     this.timer = null;
   }
@@ -44,10 +45,36 @@ class Watchdog extends EventEmitter {
   st(id) {
     let s = this.state.get(id);
     if (!s) {
-      s = { status: 'off', msg: '', failures: 0, nextAttemptAt: 0, launches: [], badChecks: 0, lastPresence: null, lastPresenceAt: 0, jobMisses: 0, presenceBusy: false };
+      s = { status: 'off', msg: '', failures: 0, nextAttemptAt: 0, launches: [], badChecks: 0, lastPresence: null, lastPresenceAt: 0, jobMisses: 0, presenceBusy: false, drops: [] };
       this.state.set(id, s);
     }
     return s;
+  }
+
+  /** Timeline entry for the account's History (see history.js). Emitted as 'event' (acc, kind, msg). */
+  note(acc, kind, msg) { this.emit('event', acc, kind, msg); }
+
+  /**
+   * Rejoin budget. Every kick or disconnect restart counts. When `breakerDisconnects` of them fall
+   * inside `breakerWindowMin`, keep-alive is switched off for that account: rejoining again and
+   * again is what gets accounts asked to verify. Returns true when the budget is spent.
+   */
+  recordDrop(acc, s, now = Date.now()) {
+    const w = this.settings.get('watchdog');
+    if (!w.breakerDisconnects) return false;
+    const windowMs = (w.breakerWindowMin || 60) * 60e3;
+    s.drops = (s.drops || []).filter((t) => now - t < windowMs);
+    s.drops.push(now);
+    if (s.drops.length < w.breakerDisconnects) return false;
+    acc.keepAlive.enabled = false;
+    s.drops = [];
+    s.issue = `paused: ${w.breakerDisconnects} disconnects in ${w.breakerWindowMin} min, keep-alive stopped to avoid a verification`;
+    this.setStatus(s, 'off', s.issue);
+    if (this.accounts.save) this.accounts.save();
+    log.warn(`${acc.username}: ${s.issue}`);
+    this.alerts.send('throttled', `${acc.username}: keep-alive stopped`, `It disconnected ${w.breakerDisconnects} times within ${w.breakerWindowMin} minutes, so keep-alive was turned off to stop rejoin attempts. Check the account's History, then turn keep-alive back on when it is safe.`, { level: 'error', key: acc.id });
+    this.note(acc, 'breaker', s.issue);
+    return true;
   }
 
   start() {
@@ -68,6 +95,7 @@ class Watchdog extends EventEmitter {
         const other = this.accounts.list.find((a) => a.userId === ls.userId);
         const who = other ? other.username : `user ${ls.userId}`;
         log.error(`IDENTITY MISMATCH: client pid ${inst.pid} was launched for ${acc.username} but is signed in as ${who} - closing it`);
+        this.note(acc, 'identity', `Client was signed in as ${who}. It was closed and keep-alive paused.`);
         this.alerts.send('sameAccount', `Account mix-up prevented`, `A client launched for **${acc.username}** was signed in as **${who}**. It was closed and keep-alive for ${acc.username} was paused. Re-validate the account before relaunching.`, { level: 'error', key: acc.id, force: true });
         if (acc.keepAlive.enabled) { acc.keepAlive.enabled = false; this.accounts.save(); }
         const s = this.st(acc.id);
@@ -120,6 +148,11 @@ class Watchdog extends EventEmitter {
       }
       if (s.issue) { s.issue = ''; s.msg = ''; } // user turned it back on
       if (!w.enabled) { this.setStatus(s, 'paused', 'Watchdog paused globally'); continue; }
+      if (this.guard && this.guard.paused) {
+        // Captcha guard: no rejoins, restarts or hops for any account until the person resumes.
+        this.setStatus(s, 'paused', 'Captcha guard: automation paused');
+        continue;
+      }
       if (acc.status === 'verify') { this.setStatus(s, 'error', 'needs verification'); continue; }
       if (acc.status === 'invalid' || acc.status === 'banned') { this.setStatus(s, 'error', acc.statusMsg || 'account unusable'); continue; }
       if (this.launcher.pending.has(acc.id)) { this.setStatus(s, 'launching'); continue; }
@@ -142,11 +175,13 @@ class Watchdog extends EventEmitter {
             this.accounts.save();
             s.issue = `paused: ${ls.reason}`;
             this.setStatus(s, 'off', s.issue);
+            this.note(acc, 'breaker', `Signed in elsewhere (code ${ls.code}). Keep-alive turned off.`);
             ls.disconnectedAt = 0;
             continue;
           }
           log.warn(`${acc.username}: disconnected (${ls.reason}) and did not rejoin - restarting`);
           this.alerts.send('disconnect', `${acc.username}: disconnected`, `Reason: **${ls.reason}**${ls.code ? ` (code ${ls.code})` : ''}. Restarting the client.`, { key: acc.id });
+          if (this.recordDrop(acc, s)) { ls.disconnectedAt = 0; await this.launcher.kill([inst.pid], 'rejoin budget reached'); continue; }
           if (acc.keepAlive.target && acc.keepAlive.target.type === 'job') s.jobMisses++;
           await this.restart(acc, inst, `disconnected: ${ls.reason}`);
           continue;
@@ -185,6 +220,12 @@ class Watchdog extends EventEmitter {
       this.launcher.launch(acc.id, target, 'keep-alive').then(() => {
         s.failures = 0; s.nextAttemptAt = 0; s.msg = '';
       }, (e) => {
+        if (e && e.guardPaused) {
+          // refused by the captcha guard, not a failed launch: no backoff, no alert
+          s.nextAttemptAt = 0; s.launches.pop();
+          this.setStatus(s, 'paused', 'Captcha guard: automation paused');
+          return;
+        }
         if (e && e.verification) {
           // Don't keep asking: every attempt makes Roblox more suspicious. The person completes it.
           s.nextAttemptAt = Date.now() + VERIFY_PAUSE_MS;
@@ -219,6 +260,7 @@ class Watchdog extends EventEmitter {
     s.badChecks = 0;
     s.nextAttemptAt = Date.now() + rejoinDelay(s, this.settings.get('watchdog'));
     s.msg = reason;
+    this.note(acc, 'restart', reason);
     await this.launcher.kill([inst.pid], reason);
   }
 
@@ -240,6 +282,7 @@ class Watchdog extends EventEmitter {
         this.setStatus(s, 'running', `${PRESENCE[p.userPresenceType]} (${s.badChecks}/${w.badChecksToRestart})`);
         if (s.badChecks >= w.badChecksToRestart && this.launcher.instances.has(inst.pid)) {
           log.warn(`${acc.username}: client alive but not in a game (kicked/disconnected?) - restarting`);
+          if (this.recordDrop(acc, s)) { s.badChecks = 0; await this.launcher.kill([inst.pid], 'rejoin budget reached'); return; }
           if (t && t.type === 'job') s.jobMisses++;
           await this.restart(acc, inst, 'disconnected/kicked');
         }
