@@ -249,6 +249,17 @@ label.f { display: block; color: var(--text2); font-size: 12px; margin: 12px 0 5
 .okc { color: var(--ok); font-weight: 600; }
 .hidden { display: none !important; }
 
+/* captcha guard banner: shown while automatic activity is paused */
+.guard-banner { margin: 0 0 14px; padding: 14px 16px; border: 1.5px solid var(--warn, #fbbf24); border-radius: 12px; background: var(--accent-soft); color: var(--text); font-size: 13px; line-height: 1.5; }
+.guard-banner b { font-weight: 700; }
+
+/* account History timeline in the Details dialog */
+.hist { list-style: none; margin: 6px 0 0; padding: 0; max-height: 220px; overflow: auto; border: 1px solid var(--line); border-radius: 10px; }
+.hist li { display: grid; grid-template-columns: 74px 1fr; gap: 8px; padding: 6px 10px; border-top: 1px solid var(--line); font-size: 12px; }
+.hist li:first-child { border-top: 0; }
+.hist .ht { color: var(--text2); font-variant-numeric: tabular-nums; }
+.hist .hk { color: var(--text2); text-transform: uppercase; font-size: 10px; letter-spacing: .6px; margin-right: 6px; }
+
 .game-preview {
   display: flex; gap: 11px; align-items: center; margin-top: 10px; padding: 9px; border-radius: 11px; background: var(--bg2);
   border: 1px dashed var(--line2); min-height: 60px;

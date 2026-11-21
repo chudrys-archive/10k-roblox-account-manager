@@ -239,8 +239,23 @@ function render() {
   renderFavs();
   renderAfk();
   renderWindows();
+  renderGuard();
   if (!settingsDirty && $('#tab-settings').classList.contains('active')) renderSettings();
 }
+
+// captcha guard banner: shown while a captcha has paused all automatic activity
+function renderGuard() {
+  const g = S.captchaGuard;
+  const el = $('#guard-banner');
+  if (!g || !g.paused) { el.classList.add('hidden'); if (el.dataset.on) { el.innerHTML = ''; delete el.dataset.on; } return; }
+  el.dataset.on = '1';
+  el.classList.remove('hidden');
+  el.innerHTML = `<div><b>Automation paused by the captcha guard.</b> ${g.account ? `${esc(g.account)} hit a captcha or verification at ${new Date(g.since).toLocaleTimeString()}. ` : ''}Keep-alive rejoins, restarts, server hops and API launches are stopped for every account. Open the flagged account in the browser, complete the check, click Validate, then resume.${g.resumeAt ? ` Resumes by itself at ${new Date(g.resumeAt).toLocaleTimeString()}.` : ''}</div>
+    <div class="btn-row" style="margin-top:10px"><button class="btn primary sm" id="guard-resume">${icon('play')}Resume automation</button></div>`;
+}
+$('#guard-banner').addEventListener('click', (e) => {
+  if (e.target.closest('#guard-resume')) run(() => call('/ui/captcha-guard/resume', {}));
+});
 
 function renderNav() {
   if (!S) return;
@@ -832,6 +847,8 @@ function openDetails(id) {
     <label class="f">Custom fields (key=value per line – readable from the API)</label><textarea id="d-fields" style="min-height:60px">${esc(fields)}</textarea>
     <div class="toggle-row"><label class="switch"><input type="checkbox" id="d-afk" ${a.fields?.antiAfk === 'off' ? '' : 'checked'}><span></span></label><div class="txt">Anti-AFK for this account</div></div>
     ${a.keepAlive.enabled ? `<div class="small">Keep-alive target: <b>${esc(a.keepAlive.target?.label)}</b></div>` : ''}
+    <label class="f">History (this session)</label>
+    <ol class="hist" id="d-history"><li><span class="ht muted">…</span><span class="muted">Loading</span></li></ol>
     <div class="btn-row">
       <button class="btn sm" id="d-browser">${icon('globe')}Browser</button>
       <button class="btn sm" id="d-validate">${icon('check')}Validate</button>
@@ -851,6 +868,7 @@ function openDetails(id) {
     if (patch.cookie) await call('/ui/accounts/validate', { ids: [id] });
     toast('ok', 'Saved'); closeDialog();
   });
+  loadHistory(d, id);
   bind($('#d-browser', d), async () => { await call(`/ui/accounts/${id}/browser`, {}); toast('ok', 'Browser opened'); });
   bind($('#d-validate', d), async () => { await ACT.validate([id]); closeDialog(); });
   bind($('#d-refresh', d), async () => { await call(`/ui/accounts/${id}/refresh-cookie`, {}); toast('ok', 'Cookie refreshed'); });
@@ -860,6 +878,21 @@ function openDetails(id) {
     if (!await confirmDialog('Sign this session out?', 'The stored cookie is revoked on Roblox. You will need to log this account in again.', { ok: 'Sign out', danger: true })) return;
     await call(`/ui/accounts/${id}/logout`, {}); toast('ok', 'Signed out');
   });
+}
+
+const HIST_LABEL = { launch: 'Launch', join: 'Joined', disconnect: 'Disconnect', restart: 'Restart', verify: 'Verify', identity: 'Identity', breaker: 'Paused', guard: 'Guard' };
+async function loadHistory(d, id) {
+  const list = $('#d-history', d);
+  if (!list) return;
+  try {
+    const rows = await call(`/ui/accounts/${id}/history`);
+    if (!document.body.contains(d)) return;
+    list.innerHTML = rows.length
+      ? rows.map((h) => `<li><span class="ht">${new Date(h.t).toLocaleTimeString()}</span><span><span class="hk">${esc(HIST_LABEL[h.kind] || h.kind)}</span>${esc(h.msg)}</span></li>`).join('')
+      : '<li><span class="ht muted">–</span><span class="muted">Nothing recorded yet this session.</span></li>';
+  } catch (e) {
+    list.innerHTML = `<li><span class="ht muted">–</span><span class="err">${esc(e.message)}</span></li>`;
+  }
 }
 
 // ============================================================ unlock
@@ -971,8 +1004,15 @@ const SETTINGS = [
     ['antiAfk.waitUserIdleSec', 'num', 'Wait until you pause input (seconds)', 'Avoids stealing focus mid-typing; never delays more than 3 min'],
     ['antiAfk.includeUntracked', 'bool', 'Also nudge Roblox windows not started here'],
   ]],
+  ['Captcha guard', 'lock', [
+    ['captchaGuard.enabled', 'bool', 'Pause automation on a captcha', 'When Roblox shows a captcha or verification for any account, keep-alive rejoins, restarts, server hops and API launches stop until you resume'],
+    ['captchaGuard.pauseAll', 'bool', 'Pause every account, not only the flagged one', 'Off = only the flagged account is stopped and everything else keeps running'],
+    ['captchaGuard.autoResumeMin', 'num', 'Resume by itself after (minutes, 0 = never)', '0 waits for you to press Resume. Accounts still marked "needs verification" stay blocked until they are validated'],
+  ]],
   ['Keep-alive watchdog', 'shield', [
     ['watchdog.enabled', 'bool', 'Watchdog enabled', 'Master switch for automatic relaunching'],
+    ['watchdog.breakerDisconnects', 'num', 'Stop keep-alive after this many disconnects (0 = off)', 'Kicks and lost connections inside the window below turn keep-alive off for that account, so it stops rejoining and does not get asked to verify'],
+    ['watchdog.breakerWindowMin', 'num', 'Disconnect window (minutes)'],
     ['watchdog.presenceCheck', 'bool', 'Presence fallback check', 'Also asks Roblox whether the account is in a game (catches clients stuck without any log signal)'],
     ['watchdog.disconnectGraceSec', 'num', 'Restart after disconnect (seconds)', 'Kicks and lost connections are read from the client log. Teleports reconnect within seconds and are ignored'],
     ['watchdog.presenceIntervalSec', 'num', 'Presence check interval (seconds)'],
@@ -1007,6 +1047,7 @@ const SETTINGS = [
     ['alerts.events.invalid', 'bool', 'Login expired / account moderated'],
     ['alerts.events.throttled', 'bool', 'Relaunch limit reached'],
     ['alerts.events.launchFail', 'bool', 'Launch failed'],
+    ['alerts.events.captchaGuard', 'bool', 'Captcha guard paused automation'],
   ]],
   ['General', 'gear', [
     ['startWithWindows', 'bool', 'Start with Windows', 'Starts hidden in the background; keep-alive accounts come back automatically after a reboot'],
