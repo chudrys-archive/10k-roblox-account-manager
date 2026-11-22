@@ -1,10 +1,13 @@
 using System;
+using Microsoft.Win32;
 using System.Diagnostics;
+using System.Net;
 using System.IO;
 using System.IO.Compression;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -64,6 +67,9 @@ internal static class WindowsLauncher
         {
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
+
+            // ---- Make sure the WebView2 Runtime is installed (installs it silently if not) ----
+            if (!EnsureWebView2Runtime()) return 1;
 
             var appDir = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -312,6 +318,87 @@ internal static class WindowsLauncher
         scType.InvokeMember("Save",         BindingFlags.InvokeMethod, null, sc, null);
     }
 
+    // ── Microsoft Edge WebView2 Runtime (Evergreen) ─────────────────────────────
+    // Detection keys and silent switches: Microsoft Learn, WebView2 distribution docs.
+    private const string WebView2ClientGuid = "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}";
+    // Evergreen bootstrapper link. It redirects to MicrosoftEdgeWebview2Setup.exe on
+    // msedge.sf.dl.delivery.mp.microsoft.com (checked 2026-11-22). The installer is Authenticode-checked before it runs.
+    private const string WebView2BootstrapperUrl = "https://go.microsoft.com/fwlink/p/?LinkId=2124703";
+    private const string WebView2DownloadPage = "https://developer.microsoft.com/microsoft-edge/webview2/";
+
+    // Runtime is present when the pv value under the EdgeUpdate client key is non-empty and not 0.0.0.0.
+    private static bool IsWebView2RuntimeInstalled()
+    {
+        var locations = new[]
+        {
+            new { Root = Registry.LocalMachine, Sub = @"SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\" + WebView2ClientGuid },
+            new { Root = Registry.LocalMachine, Sub = @"SOFTWARE\Microsoft\EdgeUpdate\Clients\" + WebView2ClientGuid },
+            new { Root = Registry.CurrentUser,  Sub = @"Software\Microsoft\EdgeUpdate\Clients\" + WebView2ClientGuid },
+        };
+        foreach (var loc in locations)
+        {
+            try
+            {
+                using (var key = loc.Root.OpenSubKey(loc.Sub))
+                {
+                    var pv = key == null ? null : key.GetValue("pv") as string;
+                    if (!string.IsNullOrWhiteSpace(pv) && pv.Trim() != "0.0.0.0") return true;
+                }
+            }
+            catch { /* key not readable: treat as absent */ }
+        }
+        return false;
+    }
+
+    // The bootstrapper is downloaded at run time, so it only runs if Microsoft signed it.
+    private static bool IsMicrosoftSigned(string path)
+    {
+        try
+        {
+            using (var cert = new X509Certificate2(X509Certificate.CreateFromSignedFile(path)))
+                return cert.Subject.IndexOf("O=Microsoft Corporation", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+        catch { return false; }
+    }
+
+    // Installs the Evergreen Runtime silently if it is missing. Returns false (after telling the person) if it still is not there.
+    private static bool EnsureWebView2Runtime()
+    {
+        if (IsWebView2RuntimeInstalled()) return true;
+
+        var setup = Path.Combine(Path.GetTempPath(), "MicrosoftEdgeWebview2Setup-" + Guid.NewGuid().ToString("N") + ".exe");
+        string problem = null;
+        try
+        {
+            ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
+            using (var web = new WebClient()) web.DownloadFile(WebView2BootstrapperUrl, setup);
+
+            if (!IsMicrosoftSigned(setup))
+            {
+                problem = "the downloaded WebView2 installer is not signed by Microsoft";
+            }
+            else
+            {
+                using (var installer = Process.Start(new ProcessStartInfo(setup, "/silent /install")
+                       { UseShellExecute = false, CreateNoWindow = true }))
+                {
+                    if (installer == null) problem = "the WebView2 installer did not start";
+                    else if (!installer.WaitForExit(15 * 60 * 1000)) problem = "the WebView2 installer did not finish within 15 minutes";
+                }
+            }
+        }
+        catch (Exception e) { problem = e.Message; }
+        finally { try { File.Delete(setup); } catch { } }
+
+        if (problem == null && IsWebView2RuntimeInstalled()) return true;
+
+        MessageBox.Show(
+            "The Microsoft Edge WebView2 Runtime is required and could not be installed automatically" +
+            (problem == null ? "." : " (" + problem + ").") +
+            "\n\nInstall it from:\n" + WebView2DownloadPage + "\n\nThen start the manager again.",
+            FriendlyName, MessageBoxButtons.OK, MessageBoxIcon.Error);
+        return false;
+    }
     // True when manager.lock names a PID that is still running. A live instance
     // runs from its own runtime folder, so that folder must not be deleted.
     private static bool IsManagerAlive(string lockPath)

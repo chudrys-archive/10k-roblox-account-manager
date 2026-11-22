@@ -6,6 +6,7 @@ const { spawn, execFileSync } = require('child_process');
 const EventEmitter = require('events');
 const { api, RobloxError } = require('./roblox');
 const { DATA, logger, sleep, atomicWrite, readJson } = require('./util');
+const { buildFlags } = require('./fflags');
 
 const log = logger('launcher');
 const INSTANCES_FILE = path.join(DATA, 'instances.json');
@@ -487,10 +488,11 @@ class Launcher extends EventEmitter {
   }
 
   applyFFlags(exePath) {
-    const fps = this.settings.get('fpsCap');
-    const custom = this.settings.get('customFFlags');
-    const flags = custom ? JSON.parse(custom) : {};
-    if (fps) flags.DFIntTaskSchedulerTargetFps = fps;
+    const flags = buildFlags({
+      fastProfile: this.settings.get('fastProfile'),
+      fpsCap: this.settings.get('fpsCap'),
+      customFFlags: this.settings.get('customFFlags'),
+    });
     // remove flags we wrote before but which are no longer configured
     const managedFile = path.join(DATA, 'fflags-managed.json');
     const prevManaged = readJson(managedFile, []);

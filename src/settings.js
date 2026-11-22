@@ -24,6 +24,7 @@ const DEFAULTS = {
   windowTitle: '{name}',       // {name} {username} {alias} {userId} {group}
   autoTile: false,
   tileColumns: 0,              // 0 = auto
+  fastProfile: 'off',          // 'off' | 'low' | 'lowest': see src/fflags.js (texture quality, post-processing)
   fpsCap: 0,                   // 0 = don't touch ClientAppSettings
   customFFlags: '',            // raw JSON merged into ClientAppSettings.json
 
@@ -107,6 +108,7 @@ class Settings extends EventEmitter {
     if (typeof next.testClientPath !== 'string') throw new Error('Test Roblox executable must be a path');
     next.testClientPath = next.testClientPath.trim().replace(/^"(.*)"$/, '$1');
     next.tileColumns = num(next.tileColumns, 0, 0, 20);
+    if (!['off', 'low', 'lowest'].includes(next.fastProfile)) next.fastProfile = 'off';
     next.fpsCap = num(next.fpsCap, 0, 0, 1000);
     if (!['replace', 'skip', 'allow'].includes(next.onAlreadyRunning)) next.onAlreadyRunning = 'replace';
     const w = next.watchdog;

@@ -1031,6 +1031,7 @@ const SETTINGS = [
     ['tileColumns', 'num', 'Tile columns (0 = auto)'],
     ['clientPriority', [['Normal', 'Normal'], ['BelowNormal', 'Below normal'], ['Idle', 'Low (idle)']], 'CPU priority of clients', 'Lower priority keeps your PC responsive with many alts'],
     ['trimMemoryMin', 'num', 'Trim client memory every (minutes, 0 = off)', 'Releases idle RAM back to Windows'],
+    ['fastProfile', [['off', 'Off'], ['low', 'Low: lower texture quality'], ['lowest', 'Lowest: lowest textures, no post-processing']], 'Graphics preset', 'Written to every client on next launch. Custom FFlags below override it. Roblox ignores flags it does not allow'],
     ['fpsCap', 'num', 'FPS cap (0 = Roblox default)', 'Low caps (15–30) save lots of CPU/GPU on idle alts. Applies on next launch'],
     ['customFFlags', 'textarea', 'Extra FFlags (JSON)', 'Merged into ClientAppSettings.json. Roblox only honours allow-listed flags'],
   ]],
