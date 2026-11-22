@@ -78,6 +78,13 @@ internal static class WindowsLauncher
             string payloadHash;
             var runtime = UnpackRuntime(assembly, Path.Combine(appDir, "runtime"), out payloadHash);
 
+            // ---- Detect a live instance before touching the runtime folders ----
+            var earlyDataDir = Environment.GetEnvironmentVariable("IRAM_DATA_DIR");
+            earlyDataDir = string.IsNullOrWhiteSpace(earlyDataDir)
+                ? Path.Combine(appDir, "data")
+                : Path.GetFullPath(earlyDataDir);
+            bool instanceAlive = IsManagerAlive(Path.Combine(earlyDataDir, "manager.lock"));
+
             // ---- Install / update ----
             var hashFile    = Path.Combine(appDir, "installed.hash");
             var storedHash  = File.Exists(hashFile) ? File.ReadAllText(hashFile).Trim() : "";
@@ -109,7 +116,7 @@ internal static class WindowsLauncher
                 }
                 catch { /* shortcuts are best-effort */ }
 
-                CleanOldRuntimes(Path.Combine(appDir, "runtime"), payloadHash);
+                if (!instanceAlive) CleanOldRuntimes(Path.Combine(appDir, "runtime"), payloadHash);
 
                 if (!isInstalledCopy)
                 {
@@ -303,6 +310,21 @@ internal static class WindowsLauncher
         scType.InvokeMember("Description",  BindingFlags.SetProperty, null, sc, new object[] { description });
         scType.InvokeMember("IconLocation", BindingFlags.SetProperty, null, sc, new object[] { targetPath + ",0" });
         scType.InvokeMember("Save",         BindingFlags.InvokeMethod, null, sc, null);
+    }
+
+    // True when manager.lock names a PID that is still running. A live instance
+    // runs from its own runtime folder, so that folder must not be deleted.
+    private static bool IsManagerAlive(string lockPath)
+    {
+        try
+        {
+            if (!File.Exists(lockPath)) return false;
+            var m = Regex.Match(File.ReadAllText(lockPath), "\"pid\"\\s*:\\s*(\\d+)");
+            if (!m.Success) return false;
+            Process.GetProcessById(int.Parse(m.Groups[1].Value));
+            return true;
+        }
+        catch { return false; }
     }
 
     // Delete runtime subdirectories from old versions to reclaim disk space.
