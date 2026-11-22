@@ -16,7 +16,7 @@ function normalize(a) {
     group: a.group || 'Default',
     cookie: a.cookie || '',
     password: a.password || '',
-    status: a.status || 'unknown',     // valid | invalid | banned | error | unknown
+    status: a.status || 'unknown',     // valid | verify | invalid | banned | error | unknown
     statusMsg: a.statusMsg || '',
     robux: a.robux ?? null,
     avatarUrl: a.avatarUrl || '',
@@ -38,6 +38,7 @@ class AccountStore extends EventEmitter {
     this.list = [];
     this.loaded = false;
     this.sessions = new Map();
+    this.presence = new Map(); // userId -> {type, location, placeId, at}
     this.saveTimer = null;
   }
 
@@ -94,7 +95,7 @@ class AccountStore extends EventEmitter {
 
   publicView(acc) {
     const { cookie, password, ...rest } = acc;
-    return { ...rest, hasPassword: !!password, cookieAgeDays: Math.floor((Date.now() - acc.cookieUpdatedAt) / 864e5) };
+    return { ...rest, hasPassword: !!password, cookieAgeDays: Math.floor((Date.now() - acc.cookieUpdatedAt) / 864e5), presence: this.presence.get(acc.userId) || null };
   }
 
   /** Add or update from a cookie. Returns { account, created }. */
@@ -183,7 +184,6 @@ class AccountStore extends EventEmitter {
     this.save();
   }
 
-  /** Check cookie validity, username changes, bans and robux. */
   /** Set status; fires 'invalid' once when an account goes from usable to invalid/banned. */
   setStatus(acc, status, msg) {
     const was = acc.status;
@@ -191,6 +191,31 @@ class AccountStore extends EventEmitter {
     if ((status === 'invalid' || status === 'banned') && was !== status) this.emit('invalid', acc);
   }
 
+  /**
+   * Roblox asked this account to verify (captcha / security check). The account is locked out of
+   * launching and keep-alive until the person completes the check in a browser and validates again;
+   * listeners close its clients. Returns false if it was already flagged.
+   */
+  markVerification(acc, where) {
+    if (!acc || acc.status === 'verify') return false;
+    acc.keepAlive.pausedForVerify = !!acc.keepAlive.enabled || !!acc.keepAlive.pausedForVerify;
+    acc.keepAlive.enabled = false;
+    this.setStatus(acc, 'verify', `Roblox asked for verification (${where}). Open the account in the browser, complete the check, then click Validate.`);
+    log.warn(`${acc.username}: needs verification (${where}) - clients closed, keep-alive paused`);
+    this.save();
+    this.emit('verification', acc, where);
+    return true;
+  }
+
+  /** Verification is done: back to normal, and keep-alive resumes if verification paused it. */
+  clearVerification(acc) {
+    if (acc.keepAlive.pausedForVerify) acc.keepAlive.enabled = true;
+    delete acc.keepAlive.pausedForVerify;
+    this.setStatus(acc, 'valid');
+    log.info(`${acc.username}: verification cleared`);
+  }
+
+  /** Check cookie validity, username changes, bans and robux. */
   async validate(acc) {
     const s = this.session(acc);
     try {
@@ -199,10 +224,15 @@ class AccountStore extends EventEmitter {
       acc.userId = me.id; acc.username = me.name; acc.displayName = me.displayName;
       const mod = await api.getModeration(s);
       if (mod) this.setStatus(acc, 'banned', `Moderated: ${mod.punishmentTypeDescription || mod.messageToUser || 'restricted'}`);
-      else this.setStatus(acc, 'valid');
+      else if (acc.status === 'verify') {
+        // only a successful sign-in ticket proves Roblox no longer wants the check
+        await api.getAuthTicket(s);
+        this.clearVerification(acc);
+      } else this.setStatus(acc, 'valid');
       try { acc.robux = await api.getRobux(s, acc.userId); } catch {}
     } catch (e) {
-      if (e instanceof RobloxError && e.status === 401) this.setStatus(acc, 'invalid', 'Cookie expired or revoked - re-login needed');
+      if (e && e.verification) this.markVerification(acc, 'validate');
+      else if (e instanceof RobloxError && e.status === 401) this.setStatus(acc, 'invalid', 'Cookie expired or revoked - re-login needed');
       else this.setStatus(acc, 'error', e.message);
     }
     acc.lastValidatedAt = Date.now();
@@ -234,17 +264,61 @@ class AccountStore extends EventEmitter {
     const fresh = await api.refreshCookie(s);
     const check = await api.getAuthenticated({ cookie: fresh });
     if (check.id !== acc.userId) throw new Error('refreshed cookie belongs to another user?!');
-    acc.cookie = fresh; acc.cookieUpdatedAt = Date.now(); acc.status = 'valid';
+    acc.cookie = fresh; acc.cookieUpdatedAt = Date.now();
+    if (!['banned', 'verify'].includes(acc.status)) acc.status = 'valid'; // a new cookie doesn't lift a ban or a check
     this.sessions.delete(acc.id);
     this.save();
     log.info(`refreshed cookie for ${acc.username}`);
   }
 
+  /**
+   * Cookie checker: validate raw cookies without storing anything. Reports per cookie:
+   * valid, userId, username, displayName, created, robux, status (active / restricted / banned /
+   * needs verification / invalid) and whether it is already in the manager.
+   */
+  async checkCookies(text) {
+    const raw = String(text || '').split(/\r?\n/).map((l) => extractCookie(l)).filter(Boolean);
+    const cookies = [...new Set(raw)].slice(0, 500);
+    const out = new Array(cookies.length);
+    await pool(cookies.map((c, i) => [c, i]), 3, async ([cookie, i]) => {
+      const s = { cookie };
+      const row = { n: i + 1, valid: false, status: 'invalid', tail: cookie.slice(-6) };
+      try {
+        const me = await api.getAuthenticated(s);
+        Object.assign(row, { valid: true, userId: me.id, username: me.name, displayName: me.displayName, status: 'active' });
+        row.known = !!this.list.find((a) => a.userId === me.id);
+        try { row.created = (await api.getUser(s, me.id)).created || ''; } catch {}
+        try { row.robux = await api.getRobux(s, me.id); } catch {}
+        const mod = await api.getModeration(s);
+        if (mod) row.status = /ban|delet|terminat/i.test(JSON.stringify(mod)) ? 'banned' : 'restricted';
+      } catch (e) {
+        if (e && e.verification) { row.valid = true; row.status = 'needs verification'; }
+        else row.error = e.status === 401 ? 'invalid or expired' : e.message;
+      }
+      out[i] = row;
+    });
+    log.info(`cookie check: ${out.filter((r) => r.valid).length}/${out.length} valid`);
+    return out;
+  }
+
+  /** Live presence of every account (one batched request per 100 accounts). Kept in memory only. */
+  async pollPresence() {
+    const ids = this.list.filter((a) => a.userId && !['invalid', 'banned'].includes(a.status)).map((a) => a.userId);
+    if (!ids.length) return;
+    const s = this.anySession();
+    if (!s.cookie) return;
+    for (let i = 0; i < ids.length; i += 100) {
+      const ps = await api.getPresence(s, ids.slice(i, i + 100));
+      for (const p of ps) this.presence.set(p.userId, { type: p.userPresenceType, location: p.lastLocation || '', placeId: p.placeId || 0, at: Date.now() });
+    }
+    this.changed();
+  }
+
   /** Any valid session (used for public-ish endpoints that still want auth, e.g. server lists). */
   anySession(preferId) {
     const p = preferId && this.get(preferId);
-    if (p && p.status !== 'invalid') return this.session(p);
-    const a = this.list.find((x) => x.status === 'valid') || this.list.find((x) => x.status !== 'invalid');
+    if (p && !['invalid', 'verify'].includes(p.status)) return this.session(p);
+    const a = this.list.find((x) => x.status === 'valid') || this.list.find((x) => !['invalid', 'verify'].includes(x.status));
     return a ? this.session(a) : {};
   }
 }

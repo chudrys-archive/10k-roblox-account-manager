@@ -9,6 +9,7 @@ const DEFAULTS = {
   port: 7963,
   openUiOnStart: true,
   autoValidateOnStart: true,
+  presencePollSec: 30,         // live presence for all accounts; 0 = off
 
   // launching
   multiInstance: true,
@@ -40,6 +41,15 @@ const DEFAULTS = {
     maxRelaunchesPerHour: 15,
     fallbackToPublic: true,    // if a specific JobId keeps failing, join any server instead
     restartEveryMin: 0,        // 0 = never; otherwise scheduled restart of keep-alive clients
+    breakerDisconnects: 4,     // this many kicks/disconnects inside breakerWindowMin turn keep-alive off for that account (0 = off)
+    breakerWindowMin: 60,
+  },
+
+  // captcha guard: a captcha / verification on any account pauses all automatic activity
+  captchaGuard: {
+    enabled: true,
+    pauseAll: true,            // false = only the affected account is stopped (the pre-5.1 behaviour)
+    autoResumeMin: 0,          // 0 = wait for Resume; otherwise resume by itself after this many minutes
   },
 
   // anti-AFK: Roblox kicks after 20 idle minutes
@@ -65,7 +75,7 @@ const DEFAULTS = {
     webhook: '',               // Discord webhook URL
     mention: '',               // e.g. <@123> - pinged on errors only
     cooldownMin: 5,            // same alert for the same account at most once per N minutes
-    events: { crash: true, disconnect: true, sameAccount: true, invalid: true, throttled: true, launchFail: false },
+    events: { crash: true, disconnect: true, sameAccount: true, invalid: true, throttled: true, launchFail: false, captchaGuard: true },
   },
 
   startWithWindows: false,
@@ -105,6 +115,7 @@ class Settings extends EventEmitter {
     next.port = num(next.port, 7963, 1024, 65535);
     next.launchDelaySec = num(next.launchDelaySec, 6, 0, 120);
     next.launchTimeoutSec = num(next.launchTimeoutSec, 90, 15, 600);
+    next.presencePollSec = next.presencePollSec ? num(next.presencePollSec, 30, 15, 600) : 0;
     if (typeof next.testClientPath !== 'string') throw new Error('Test Roblox executable must be a path');
     next.testClientPath = next.testClientPath.trim().replace(/^"(.*)"$/, '$1');
     next.tileColumns = num(next.tileColumns, 0, 0, 20);
@@ -119,6 +130,12 @@ class Settings extends EventEmitter {
     w.killHungAfterSec = num(w.killHungAfterSec, 120, 0, 3600);
     w.maxRelaunchesPerHour = num(w.maxRelaunchesPerHour, 15, 1, 120);
     w.restartEveryMin = num(w.restartEveryMin, 0, 0, 1440);
+    w.breakerDisconnects = num(w.breakerDisconnects, 4, 0, 50);
+    w.breakerWindowMin = num(w.breakerWindowMin, 60, 5, 1440);
+    const g = next.captchaGuard;
+    g.enabled = !!g.enabled;
+    g.pauseAll = !!g.pauseAll;
+    g.autoResumeMin = num(g.autoResumeMin, 0, 0, 1440);
     const a = next.antiAfk;
     a.intervalMin = num(a.intervalMin, 12, 1, 16);
     a.waitUserIdleSec = num(a.waitUserIdleSec, 4, 0, 60);

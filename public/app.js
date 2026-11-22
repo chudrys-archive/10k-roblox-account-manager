@@ -239,8 +239,23 @@ function render() {
   renderFavs();
   renderAfk();
   renderWindows();
+  renderGuard();
   if (!settingsDirty && $('#tab-settings').classList.contains('active')) renderSettings();
 }
+
+// captcha guard banner: shown while a captcha has paused all automatic activity
+function renderGuard() {
+  const g = S.captchaGuard;
+  const el = $('#guard-banner');
+  if (!g || !g.paused) { el.classList.add('hidden'); if (el.dataset.on) { el.innerHTML = ''; delete el.dataset.on; } return; }
+  el.dataset.on = '1';
+  el.classList.remove('hidden');
+  el.innerHTML = `<div><b>Automation paused by the captcha guard.</b> ${g.account ? `${esc(g.account)} hit a captcha or verification at ${new Date(g.since).toLocaleTimeString()}. ` : ''}Keep-alive rejoins, restarts, server hops and API launches are stopped for every account. Open the flagged account in the browser, complete the check, click Validate, then resume.${g.resumeAt ? ` Resumes by itself at ${new Date(g.resumeAt).toLocaleTimeString()}.` : ''}</div>
+    <div class="btn-row" style="margin-top:10px"><button class="btn primary sm" id="guard-resume">${icon('play')}Resume automation</button></div>`;
+}
+$('#guard-banner').addEventListener('click', (e) => {
+  if (e.target.closest('#guard-resume')) run(() => call('/ui/captcha-guard/resume', {}));
+});
 
 function renderNav() {
   if (!S) return;
@@ -263,6 +278,7 @@ function renderStats() {
   const acc = S.accounts;
   const valid = acc.filter((a) => a.status === 'valid').length;
   const bad = acc.filter((a) => a.status === 'invalid' || a.status === 'banned').length;
+  const verify = acc.filter((a) => a.status === 'verify').length;
   const inst = S.launcher.instances;
   const mem = inst.reduce((s, i) => s + (i.memMB || 0), 0);
   const ka = acc.filter((a) => a.keepAlive.enabled);
@@ -272,7 +288,7 @@ function renderStats() {
   const afkVal = !afk.enabled ? 'Off' : afk.nextDue ? fmtIn(afk.nextDue) : 'Idle';
   const afkHint = !afk.enabled ? 'clients may be kicked after 20 min' : afk.status || (afk.nextDue ? 'until next nudge' : 'no clients running');
   const cards = [
-    ['users', 'Accounts', acc.length, `${valid} valid${bad ? ` · <span class="err">${bad} need login</span>` : ''}`],
+    ['users', 'Accounts', acc.length, `${valid} valid${bad ? ` · <span class="err">${bad} need login</span>` : ''}${verify ? ` · <span class="err">${verify} need verification</span>` : ''}`],
     ['play', 'Running', inst.length, inst.length ? `${(mem / 1024).toFixed(1)} GB RAM · queue ${S.launcher.queued.length}` : `queue ${S.launcher.queued.length}`],
     ['shield', 'Keep-alive', ka.length, kaIssues ? `<span style="color:var(--warn)">${kaIssues} recovering</span>` : 'all healthy'],
     ['zap', 'Anti-AFK', afkVal, esc(afkHint)],
@@ -329,7 +345,11 @@ function clientCell(a) {
   const qi = S.launcher.queued.indexOf(a.id);
   if (qi === 0) return '<span class="badge queued">Launching…</span>';
   if (qi > 0) return `<span class="badge queued qpos">Queued #${qi}</span>`;
-  return `<div class="client"><span class="muted">Offline</span><span class="loc muted">last played ${fmtAgo(a.lastUsedAt)}</span></div>`;
+  if (a.status === 'verify') return '<div class="client"><span class="badge verify">needs verification</span><span class="loc muted">client closed · verify in browser, then Validate</span></div>';
+  const pr = a.presence;
+  const prTxt = pr ? ['Offline', 'Online', 'In game', 'In Studio', 'Invisible'][pr.type] || 'Offline' : 'Offline';
+  const prLoc = pr && pr.type === 2 && pr.location ? `${pr.location} (elsewhere)` : `last played ${fmtAgo(a.lastUsedAt)}`;
+  return `<div class="client"><span class="muted" title="Live presence from Roblox">${esc(prTxt)}</span><span class="loc muted">${esc(prLoc)}</span></div>`;
 }
 
 function kaCell(a) {
@@ -358,7 +378,7 @@ function renderTable() {
       <td><div class="acc"><div class="avatar">${a.avatarUrl ? `<img src="${esc(a.avatarUrl)}" alt="" loading="lazy">` : `<div class="ph">${initials}</div>`}<span class="st ${inst ? 'on' : queued ? 'busy' : ''}"></span></div>
         <div style="min-width:0"><div class="nm">${esc(nameOf(a))}</div><div class="meta">${esc(a.alias ? a.username : a.displayName)} · ${a.userId}${a.description ? ' · ' + esc(a.description) : ''}</div></div></div></td>
       <td><span class="tag">${esc(a.group)}</span></td>
-      <td><span class="badge ${esc(a.status)}" title="${esc(a.statusMsg || 'checked ' + fmtAgo(a.lastValidatedAt))}">${esc(a.status === 'invalid' ? 'login needed' : a.status)}</span></td>
+      <td><span class="badge ${esc(a.status)}" title="${esc(a.statusMsg || 'checked ' + fmtAgo(a.lastValidatedAt))}">${esc(a.status === 'invalid' ? 'login needed' : a.status === 'verify' ? 'needs verification' : a.status)}</span></td>
       <td>${fmtNum(a.robux)}</td>
       <td>${clientCell(a)}</td>
       <td>${kaCell(a)}</td>
@@ -626,6 +646,27 @@ bind($('#btn-launch'), () => ACT.launch(needSel()));
 bind($('#btn-ka-on'), () => ACT.keepAlive(needSel(), true));
 bind($('#btn-ka-off'), () => ACT.keepAlive(needSel(), false));
 bind($('#btn-validate'), () => ACT.validate(selIds()));
+// Cookie checker: validate cookies without adding them
+bind($('#btn-check'), async () => {
+  const d = openDialog(`<h2>Check cookies</h2><p class="lead">Paste cookies (one per line, any format that contains a .ROBLOSECURITY value). Nothing is saved unless you click Import.</p>
+    <textarea id="cc-text" rows="6" placeholder="_|WARNING:-DO-NOT-SHARE-THIS..."></textarea><div id="cc-res"></div>
+    <div class="foot"><button class="btn" data-close>Close</button><button class="btn" id="cc-import" disabled>Import valid</button><button class="btn primary" id="cc-go">Check</button></div>`);
+  let valid = [];
+  $('#cc-go', d).addEventListener('click', () => run(async () => {
+    const text = $('#cc-text', d).value;
+    $('#cc-res', d).innerHTML = '<p class="muted">Checking…</p>';
+    const rows = await call('/ui/accounts/check-cookies', { text });
+    const lines = text.split(/\r?\n/).filter((l) => /_\|WARNING|[A-F0-9]{100,}/i.test(l));
+    valid = rows.filter((r) => r.valid && r.status !== 'banned').map((r) => lines.find((l) => l.includes(r.tail))).filter(Boolean);
+    $('#cc-import', d).disabled = !valid.length;
+    $('#cc-res', d).innerHTML = `<p class="muted">${rows.filter((r) => r.valid).length} of ${rows.length} valid</p><table class="ck-table"><tr><th>#</th><th>User</th><th>Status</th><th>Created</th><th>Robux</th><th></th></tr>` +
+      rows.map((r) => `<tr><td>${r.n}</td><td>${r.valid ? `${esc(r.username || '?')} <span class="muted small">${r.userId || ''}</span>` : '<span class="err">' + esc(r.error || 'invalid') + '</span>'}</td><td>${esc(r.status)}</td><td>${r.created ? esc(new Date(r.created).toLocaleDateString()) : ''}</td><td>${r.robux ?? ''}</td><td class="muted small">${r.known ? 'already added' : ''}</td></tr>`).join('') + '</table>';
+  }));
+  $('#cc-import', d).addEventListener('click', () => run(async () => {
+    const r = await call('/ui/accounts/import', { text: valid.join('\n') });
+    toast('ok', `Imported ${r.added} new, ${r.updated} updated`); closeDialog();
+  }));
+});
 bind($('#btn-tile'), async () => { const r = await call('/ui/tile', {}); toast('ok', `Tiled ${r.tiled} window(s)`); });
 bind($('#btn-kill-all'), async () => {
   const ka = S.accounts.filter((a) => a.keepAlive.enabled).length;
@@ -806,6 +847,8 @@ function openDetails(id) {
     <label class="f">Custom fields (key=value per line – readable from the API)</label><textarea id="d-fields" style="min-height:60px">${esc(fields)}</textarea>
     <div class="toggle-row"><label class="switch"><input type="checkbox" id="d-afk" ${a.fields?.antiAfk === 'off' ? '' : 'checked'}><span></span></label><div class="txt">Anti-AFK for this account</div></div>
     ${a.keepAlive.enabled ? `<div class="small">Keep-alive target: <b>${esc(a.keepAlive.target?.label)}</b></div>` : ''}
+    <label class="f">History (this session)</label>
+    <ol class="hist" id="d-history"><li><span class="ht muted">…</span><span class="muted">Loading</span></li></ol>
     <div class="btn-row">
       <button class="btn sm" id="d-browser">${icon('globe')}Browser</button>
       <button class="btn sm" id="d-validate">${icon('check')}Validate</button>
@@ -825,6 +868,7 @@ function openDetails(id) {
     if (patch.cookie) await call('/ui/accounts/validate', { ids: [id] });
     toast('ok', 'Saved'); closeDialog();
   });
+  loadHistory(d, id);
   bind($('#d-browser', d), async () => { await call(`/ui/accounts/${id}/browser`, {}); toast('ok', 'Browser opened'); });
   bind($('#d-validate', d), async () => { await ACT.validate([id]); closeDialog(); });
   bind($('#d-refresh', d), async () => { await call(`/ui/accounts/${id}/refresh-cookie`, {}); toast('ok', 'Cookie refreshed'); });
@@ -834,6 +878,21 @@ function openDetails(id) {
     if (!await confirmDialog('Sign this session out?', 'The stored cookie is revoked on Roblox. You will need to log this account in again.', { ok: 'Sign out', danger: true })) return;
     await call(`/ui/accounts/${id}/logout`, {}); toast('ok', 'Signed out');
   });
+}
+
+const HIST_LABEL = { launch: 'Launch', join: 'Joined', disconnect: 'Disconnect', restart: 'Restart', verify: 'Verify', identity: 'Identity', breaker: 'Paused', guard: 'Guard' };
+async function loadHistory(d, id) {
+  const list = $('#d-history', d);
+  if (!list) return;
+  try {
+    const rows = await call(`/ui/accounts/${id}/history`);
+    if (!document.body.contains(d)) return;
+    list.innerHTML = rows.length
+      ? rows.map((h) => `<li><span class="ht">${new Date(h.t).toLocaleTimeString()}</span><span><span class="hk">${esc(HIST_LABEL[h.kind] || h.kind)}</span>${esc(h.msg)}</span></li>`).join('')
+      : '<li><span class="ht muted">–</span><span class="muted">Nothing recorded yet this session.</span></li>';
+  } catch (e) {
+    list.innerHTML = `<li><span class="ht muted">–</span><span class="err">${esc(e.message)}</span></li>`;
+  }
 }
 
 // ============================================================ unlock
@@ -934,6 +993,7 @@ const SETTINGS = [
     ['robloxPath', 'text', 'Roblox executable', 'Leave blank to auto-detect (also works with Bloxstrap/Fishstrap)'],
     ['testClientPath', 'text', 'Test Roblox executable', 'Enter the full path to an older RobloxPlayerBeta.exe to use it for launches and retries. Roblox may still request an update. Clear this field to return to normal launching.'],
     ['neverUpdateRoblox', 'bool', "Don't update Roblox", 'Keeps your installed Roblox version: starts it directly and disables Roblox\'s own updater until you turn this off. Roblox may refuse to join games on an outdated version (error 280)'],
+    ['presencePollSec', 'num', 'Live presence every (seconds)', 'Shows Online / In game for every account, also when it plays elsewhere. 0 turns it off'],
     ['skipUpdateCheck', 'bool', 'Skip update check when current', 'Starts the game directly if your installed Roblox is already the latest version. Falls back to the normal launcher (which updates) when it is not'],
   ]],
   ['Anti-AFK', 'zap', [
@@ -944,8 +1004,15 @@ const SETTINGS = [
     ['antiAfk.waitUserIdleSec', 'num', 'Wait until you pause input (seconds)', 'Avoids stealing focus mid-typing; never delays more than 3 min'],
     ['antiAfk.includeUntracked', 'bool', 'Also nudge Roblox windows not started here'],
   ]],
+  ['Captcha guard', 'lock', [
+    ['captchaGuard.enabled', 'bool', 'Pause automation on a captcha', 'When Roblox shows a captcha or verification for any account, keep-alive rejoins, restarts, server hops and API launches stop until you resume'],
+    ['captchaGuard.pauseAll', 'bool', 'Pause every account, not only the flagged one', 'Off = only the flagged account is stopped and everything else keeps running'],
+    ['captchaGuard.autoResumeMin', 'num', 'Resume by itself after (minutes, 0 = never)', '0 waits for you to press Resume. Accounts still marked "needs verification" stay blocked until they are validated'],
+  ]],
   ['Keep-alive watchdog', 'shield', [
     ['watchdog.enabled', 'bool', 'Watchdog enabled', 'Master switch for automatic relaunching'],
+    ['watchdog.breakerDisconnects', 'num', 'Stop keep-alive after this many disconnects (0 = off)', 'Kicks and lost connections inside the window below turn keep-alive off for that account, so it stops rejoining and does not get asked to verify'],
+    ['watchdog.breakerWindowMin', 'num', 'Disconnect window (minutes)'],
     ['watchdog.presenceCheck', 'bool', 'Presence fallback check', 'Also asks Roblox whether the account is in a game (catches clients stuck without any log signal)'],
     ['watchdog.disconnectGraceSec', 'num', 'Restart after disconnect (seconds)', 'Kicks and lost connections are read from the client log. Teleports reconnect within seconds and are ignored'],
     ['watchdog.presenceIntervalSec', 'num', 'Presence check interval (seconds)'],
@@ -980,6 +1047,7 @@ const SETTINGS = [
     ['alerts.events.invalid', 'bool', 'Login expired / account moderated'],
     ['alerts.events.throttled', 'bool', 'Relaunch limit reached'],
     ['alerts.events.launchFail', 'bool', 'Launch failed'],
+    ['alerts.events.captchaGuard', 'bool', 'Captcha guard paused automation'],
   ]],
   ['General', 'gear', [
     ['startWithWindows', 'bool', 'Start with Windows', 'Starts hidden in the background; keep-alive accounts come back automatically after a reboot'],

@@ -269,11 +269,12 @@ function killUpdaters() {
 
 // ---------------- launcher ----------------
 class Launcher extends EventEmitter {
-  constructor({ helper, settings, accounts }) {
+  constructor({ helper, settings, accounts, guard = null }) {
     super();
     this.helper = helper;
     this.settings = settings;
     this.accounts = accounts;
+    this.guard = guard; // CaptchaGuard: automated launches are refused while it is paused
     this.instances = new Map(); // pid -> {pid, accountId, btid, startedAt, target, reason, hwnd, memMB, hung, hungSince}
     this.btids = new Map();     // btid -> {accountId, at, target}
     this.unknown = [];          // Roblox processes we didn't launch
@@ -532,6 +533,12 @@ class Launcher extends EventEmitter {
     const acc = this.accounts.get(accountId);
     if (!acc) throw new Error('account no longer exists');
     const name = acc.username;
+    if (this.guard && this.guard.blocks(reason)) {
+      throw Object.assign(new Error(`${name}: automatic launch skipped, the captcha guard has paused automation`), { guardPaused: true });
+    }
+    if (acc.status === 'verify') {
+      throw Object.assign(new Error(`${name} needs verification: open it in the browser, complete the check, then click Validate`), { verification: true });
+    }
     const existing = this.byAccount(accountId);
     const mode = opts.replace ? 'replace' : this.settings.get('onAlreadyRunning');
     if (existing.length && mode === 'skip') {
@@ -562,6 +569,7 @@ class Launcher extends EventEmitter {
     const session = this.accounts.session(acc);
     let ticket;
     try { ticket = await api.getAuthTicket(session); } catch (e) {
+      if (e && e.verification) this.accounts.markVerification(acc, 'sign-in ticket');
       if (e instanceof RobloxError && e.status === 401) {
         this.accounts.setStatus(acc, 'invalid', 'Cookie expired or revoked - re-login needed'); this.accounts.save();
       }

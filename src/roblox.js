@@ -51,7 +51,9 @@ async function request(session, method, url, opts = {}) {
     if (!res.ok) {
       const m = (data && data.errors && data.errors[0] && data.errors[0].message) || res.statusText || 'error';
       const u = new URL(url);
-      throw new RobloxError(`${method} ${u.host}${u.pathname} -> ${res.status} ${m}`, res.status, data);
+      const err = new RobloxError(`${method} ${u.host}${u.pathname} -> ${res.status} ${m}`, res.status, data);
+      if (isChallenge(res, text)) err.verification = true;
+      throw err;
     }
     return data;
   }

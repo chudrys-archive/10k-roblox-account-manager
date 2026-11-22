@@ -14,6 +14,8 @@ const { Watchdog } = require('./watchdog');
 const { BrowserManager, findBrowser } = require('./browser');
 const { Server } = require('./server');
 const { AntiAfk } = require('./antiafk');
+const { CaptchaGuard } = require('./captchaguard');
+const { History } = require('./history');
 
 const log = logger('main');
 const LOCK = path.join(DATA, 'manager.lock');
@@ -86,14 +88,44 @@ async function main() {
   const vault = new Vault(helper);
   await vault.init();
   const accounts = new AccountStore(vault);
-  const launcher = new Launcher({ helper, settings, accounts });
+  const guard = new CaptchaGuard({ settings });
+  const history = new History();
+  const launcher = new Launcher({ helper, settings, accounts, guard });
   const alerts = new Alerts({ settings });
   const logwatch = new LogWatcher({ launcher });
-  const watchdog = new Watchdog({ launcher, accounts, settings, logwatch, alerts });
+  const watchdog = new Watchdog({ launcher, accounts, settings, logwatch, alerts, guard });
   const browser = new BrowserManager({ settings, accounts });
   const antiAfk = new AntiAfk({ helper, launcher, settings, accounts });
   accounts.on('invalid', (acc) => alerts.send('invalid', `${acc.username}: login needed`, `${acc.statusMsg || 'The saved session is no longer valid.'}\nRe-login from the account's Details.`, { level: 'error', key: acc.id }));
   settings.on('change', (s) => applyAutostart(s.startWithWindows));
+  // Verification lockdown: close every client of the account and label it until the person verifies.
+  // Captcha guard: the same event also pauses all automatic activity (see captchaguard.js).
+  accounts.on('verification', (acc, where) => {
+    history.add(acc.id, 'verify', `Roblox asked for verification (${where})`);
+    const pids = launcher.byAccount(acc.id).map((i) => i.pid);
+    if (pids.length) launcher.kill(pids, 'needs verification').catch((e) => log.warn('close on verification: ' + e.message));
+    alerts.send('invalid', `${acc.username}: needs verification`, `Roblox asked this account to verify (${where}). Its client was closed and keep-alive paused. Open the account in the browser from the manager, complete the check, then click Validate.`, { level: 'error', key: acc.id, force: true });
+    if (guard.trip(acc, where)) {
+      alerts.send('captchaGuard', 'Automation paused', `${acc.username} hit a captcha / verification. Keep-alive rejoins, restarts, server hops and API launches are stopped for every account until you press Resume in the manager.`, { level: 'error', key: 'guard' });
+    }
+  });
+  logwatch.on('verification', (inst) => accounts.markVerification(accounts.get(inst.accountId), 'Roblox client'));
+  // Account timeline (History): what the manager saw and did for each account
+  watchdog.on('event', (acc, kind, msg) => history.add(acc.id, kind, msg));
+  launcher.on('launched', (inst) => history.add(inst.accountId, 'launch', `Started (${inst.reason}) on ${inst.target?.label || inst.target?.type || 'a game'}`));
+  logwatch.on('join', (inst, ls) => history.add(inst.accountId, 'join', `Joined server ${ls.jobId ? ls.jobId.slice(0, 8) : '?'} in place ${ls.placeId}`));
+  logwatch.on('disconnect', (inst, ls) => {
+    if (!ls.disconnectedAt || ls.reportedAt === ls.disconnectedAt) return; // Roblox writes several lines per disconnect
+    ls.reportedAt = ls.disconnectedAt;
+    history.add(inst.accountId, 'disconnect', `${ls.reason}${ls.code ? ` (code ${ls.code})` : ''}`);
+  });
+  // live presence for every account (one batched request)
+  setInterval(() => {
+    const sec = settings.get('presencePollSec');
+    if (!sec || !accounts.loaded || Date.now() - (accounts.presenceAt || 0) < sec * 1000 - 500) return;
+    accounts.presenceAt = Date.now();
+    accounts.pollPresence().catch((e) => log.debug('presence poll: ' + e.message));
+  }, 5000).unref();
 
   const onUnlocked = () => {
     if (settings.get('autoValidateOnStart') && accounts.list.length) {
@@ -101,7 +133,7 @@ async function main() {
     }
   };
 
-  const ctx = { settings, vault, accounts, launcher, watchdog, browser, antiAfk, alerts, onUnlocked, createShortcut };
+  const ctx = { settings, vault, accounts, launcher, watchdog, browser, antiAfk, alerts, guard, history, onUnlocked, createShortcut };
   const server = new Server(ctx);
   const port = await server.listen();
   atomicWrite(LOCK, JSON.stringify({ pid: process.pid, port, token: server.token }));
@@ -123,6 +155,7 @@ async function main() {
     log.info(`shutting down (${sig}${closeClients ? ', closing Roblox clients' : ''})`);
     watchdog.stop();
     antiAfk.stop();
+    guard.stop();
     logwatch.stop();
     launcher.stop();
     accounts.saveNow();

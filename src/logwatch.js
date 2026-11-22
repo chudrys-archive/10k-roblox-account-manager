@@ -16,6 +16,8 @@ const REASONS = {
   285: 'left the game', 286: 'server full / unavailable', 288: 'experience restricted',
 };
 const SAME_ACCOUNT = new Set([264, 273]);
+// A captcha / security check shown inside the Roblox client.
+const VERIFY_RE = /\b(?:captcha|funcaptcha|arkose|rblx-challenge|challengeRequired|challenge (?:is )?required|human verification|verify (?:that )?you(?:'re| are) (?:a )?human)\b/i;
 
 /**
  * Tails each managed client's own Roblox log. A log is tied to its client by the unique launch tag
@@ -125,6 +127,11 @@ class LogWatcher extends EventEmitter {
       }
       return;
     }
+    if (VERIFY_RE.test(line) && !/VerifyPatch/i.test(line) && !s.verification) {
+      s.verification = true;
+      this.emit('verification', inst, line.slice(0, 300));
+      return;
+    }
     m = line.match(/Disconnection Notification\. Reason: (\d+)|Sending disconnect with reason: (\d+)/);
     if (m || /\[FLog::Network\] Connection lost/.test(line)) {
       const code = m ? Number(m[1] || m[2]) : (s.code || 0);
@@ -140,4 +147,4 @@ class LogWatcher extends EventEmitter {
   stop() { clearInterval(this.timer); }
 }
 
-module.exports = { LogWatcher, REASONS, SAME_ACCOUNT, LOG_DIR };
+module.exports = { LogWatcher, REASONS, SAME_ACCOUNT, LOG_DIR, VERIFY_RE };

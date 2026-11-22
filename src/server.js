@@ -23,7 +23,11 @@ class Server {
     this.stateTimer = null;
     this.defineRoutes();
     const push = () => this.pushState();
-    for (const em of [ctx.accounts, ctx.launcher, ctx.watchdog, ctx.antiAfk]) em.on('change', push);
+    for (const em of [ctx.accounts, ctx.launcher, ctx.watchdog, ctx.antiAfk, ctx.guard]) em.on('change', push);
+    if (ctx.guard) {
+      ctx.guard.on('trip', (g) => this.toast('error', `Captcha guard: automation paused after ${g.account}. Resume in the banner once the check is done.`));
+      ctx.guard.on('resume', (why) => this.toast('ok', `Captcha guard: automation resumed${why === 'manual' ? '' : ` (${why})`}`));
+    }
     bus.on('log', (e) => this.broadcast('log', e));
     bus.on('toast', (t) => this.broadcast('toast', t));
   }
@@ -160,7 +164,7 @@ class Server {
     this.stateTimer = setTimeout(() => { this.stateTimer = null; this.broadcast('state', this.state()); }, 250);
   }
   state() {
-    const { vault, accounts, launcher, watchdog, settings, browser, antiAfk } = this.ctx;
+    const { vault, accounts, launcher, watchdog, settings, browser, antiAfk, guard } = this.ctx;
     const locked = vault.locked || !accounts.loaded;
     return {
       locked, vaultMode: vault.kdf, now: Date.now(),
@@ -168,6 +172,7 @@ class Server {
       launcher: launcher.publicView(),
       watchdog: watchdog.publicView(),
       antiAfk: antiAfk.publicView(),
+      captchaGuard: guard ? guard.publicView() : { paused: false },
       settings: settings.publicView(),
       browsers: browser.list(),
       roblox: settings.get('testClientPath')
@@ -261,6 +266,7 @@ class Server {
       for (const id of ids(body)) c.accounts.get(id).group = String(body.group || 'Default').slice(0, 60);
       c.accounts.save();
     });
+    this.route('POST', '/ui/accounts/check-cookies', async ({ body }) => c.accounts.checkCookies(body.text || ''));
     this.route('POST', '/ui/accounts/validate', async ({ body }) => c.accounts.validateMany(ids(body)));
     this.route('POST', '/ui/accounts/:id/refresh-cookie', async ({ params }) => { await c.accounts.refreshCookie(acc(params.id)); });
     this.route('POST', '/ui/accounts/:id/browser', async ({ params, body }) => { await c.browser.openAs(acc(params.id), body.url || undefined); });
@@ -315,6 +321,8 @@ class Server {
       return { queued: list.length };
     });
     this.route('POST', '/ui/antiafk/now', async () => ({ nudged: await c.antiAfk.tick(true) }));
+    this.route('POST', '/ui/captcha-guard/resume', () => { c.guard.resume('manual'); });
+    this.route('GET', '/ui/accounts/:id/history', ({ params }) => c.history.list(acc(params.id).id));
     this.route('POST', '/ui/alerts/test', async () => { await c.alerts.test(); }, { allowLocked: true });
     this.route('POST', '/ui/shortcut', () => { c.createShortcut(); }, { allowLocked: true });
     this.route('POST', '/ui/quit', ({ body }) => {
@@ -430,7 +438,11 @@ class Server {
             running: c.launcher.byAccount(a.id).map((i) => i.pid), keepAlive: a.keepAlive.enabled, fields: a.fields,
           })));
         case '/api/status':
-          return this.send(res, 200, { ...c.launcher.publicView(), watchdog: c.watchdog.publicView() });
+          return this.send(res, 200, { ...c.launcher.publicView(), watchdog: c.watchdog.publicView(), captchaGuard: c.guard.publicView() });
+        case '/api/history': {
+          const a = need();
+          return this.send(res, 200, c.history.list(a.id));
+        }
         case '/api/launch': {
           const a = need();
           const input = q.get('placeId') || q.get('link') || q.get('target');
@@ -464,7 +476,7 @@ class Server {
           log.warn(`API: cookie of ${a.username} was read`);
           return this.send(res, 200, a.cookie);
         }
-        default: return this.send(res, 404, { error: 'unknown endpoint', endpoints: ['/api/accounts', '/api/status', '/api/launch?account=&placeId=&jobId=', '/api/kill?account=', '/api/keepalive?account=&placeId=&enabled=', '/api/field?account=&key=[&value=]', '/api/cookie?account='] });
+        default: return this.send(res, 404, { error: 'unknown endpoint', endpoints: ['/api/accounts', '/api/status', '/api/history?account=', '/api/launch?account=&placeId=&jobId=', '/api/kill?account=', '/api/keepalive?account=&placeId=&enabled=', '/api/field?account=&key=[&value=]', '/api/cookie?account='] });
       }
     } catch (e) {
       return this.send(res, e.status && e.status < 600 ? e.status : 500, { error: e.message });
