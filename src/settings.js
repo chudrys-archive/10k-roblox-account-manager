@@ -88,18 +88,6 @@ const DEFAULTS = {
     allowCookieExport: false,
   },
 
-  // captcha auto-solver for browser login
-  // backend: 'none' disables auto-solving (manual solve in the browser window)
-  // backend: '2captcha'  — https://2captcha.com  — get API key from their dashboard
-  // backend: 'capmonster' — https://capmonster.cloud — get API key from their dashboard
-  // timeoutSec: how long to wait for a solve before giving up and falling back to manual
-  // pollDelaySec: how often to poll the solving service for the result
-  captcha: {
-    backend: 'none',           // 'none' | '2captcha' | 'capmonster'
-    apiKey: '',
-    timeoutSec: 120,
-    pollDelaySec: 3,
-  },
 };
 
 class Settings extends EventEmitter {
@@ -160,12 +148,6 @@ class Settings extends EventEmitter {
     if (next.customFFlags) {
       try { JSON.parse(next.customFFlags); } catch { throw new Error('Custom FFlags must be valid JSON'); }
     }
-    // sanitize captcha config
-    const c = next.captcha;
-    if (!['none', '2captcha', 'capmonster'].includes(c.backend)) c.backend = 'none';
-    c.apiKey = String(c.apiKey || '').trim();
-    c.timeoutSec = num(c.timeoutSec, 120, 10, 600);
-    c.pollDelaySec = num(c.pollDelaySec, 3, 1, 30);
     this.data = next;
     this.save();
     this.emit('change', this.data);
@@ -176,8 +158,6 @@ class Settings extends EventEmitter {
     const d = JSON.parse(JSON.stringify(this.data));
     d.api.passwordSet = !!d.api.password;
     d.api.password = '';
-    // mask the captcha API key in the UI view
-    d.captcha = { ...d.captcha, apiKeySet: !!d.captcha.apiKey, apiKey: '' };
     return d;
   }
 }
