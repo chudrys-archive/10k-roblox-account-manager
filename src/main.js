@@ -23,9 +23,27 @@ const noUi = process.argv.includes('--no-ui');
 
 function alive(pid) { try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } }
 
+/**
+ * Kill any existing Edge app-mode windows pointing to our local server so the
+ * next openUi call always opens a fresh window at the correct URL and token.
+ * Edge app-mode reuses windows by origin (scheme+host+port); if the manager
+ * restarts on the same port with a new token, Edge would otherwise focus the
+ * stale window and show "not found".
+ */
+function killStaleEdgeAppWindows() {
+  try {
+    execFileSync('powershell.exe', [
+      '-NoProfile', '-NonInteractive', '-Command',
+      "Get-CimInstance Win32_Process -Filter \"Name='msedge.exe'\" | Where-Object { $_.CommandLine -like '*--app=http://127.0.0.1:*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }",
+    ], { windowsHide: true, stdio: 'ignore', timeout: 5000 });
+  } catch { /* ignore — no stale windows, or PowerShell unavailable */ }
+}
+
 function openUi(url, settings) {
   const edge = findBrowser(settings.get('browserPath'));
   if (edge) {
+    // Kill stale app-mode window for this origin first so Edge opens fresh at the new URL.
+    killStaleEdgeAppWindows();
     // app-mode window = looks like a desktop app, separate from normal browsing
     spawn(edge, [`--app=${url}`, '--window-size=1400,900'], { detached: true, stdio: 'ignore' }).unref();
   } else {
