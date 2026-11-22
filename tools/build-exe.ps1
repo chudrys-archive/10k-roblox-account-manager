@@ -17,6 +17,16 @@ if (-not (Test-Path -LiteralPath $compiler -PathType Leaf)) {
     throw 'The Windows .NET Framework compiler was not found.'
 }
 
+$wv2Dir    = Join-Path $PSScriptRoot 'webview2'
+$wv2Loader = Join-Path $wv2Dir 'WebView2Loader.dll'
+$wv2Core   = Join-Path $wv2Dir 'Microsoft.Web.WebView2.Core.dll'
+$wv2Forms  = Join-Path $wv2Dir 'Microsoft.Web.WebView2.WinForms.dll'
+foreach ($f in @($wv2Loader, $wv2Core, $wv2Forms)) {
+    if (-not (Test-Path -LiteralPath $f -PathType Leaf)) {
+        throw "WebView2 file not found: $f`nRun: cd tools && mkdir webview2 && copy NuGet WebView2 DLLs here."
+    }
+}
+
 $output = [System.IO.Path]::GetFullPath($OutputDirectory)
 $output = [System.IO.Directory]::CreateDirectory($output).FullName
 $stage = Join-Path $output ('.iram-build-' + [Guid]::NewGuid().ToString('N'))
@@ -63,8 +73,14 @@ using System.Reflection;
     $compilerArgs = @(
         '/nologo', '/target:winexe', '/platform:x64', '/optimize+'
         "/out:$executable", "/win32icon:$icon", "/resource:$payload,app.zip"
+        "/resource:$wv2Loader,WebView2Loader.dll"
+        "/resource:$wv2Core,Microsoft.Web.WebView2.Core.dll"
+        "/resource:$wv2Forms,Microsoft.Web.WebView2.WinForms.dll"
         '/reference:System.Windows.Forms.dll', '/reference:System.IO.Compression.dll'
-        '/reference:System.IO.Compression.FileSystem.dll', $launcher, $versionSource
+        '/reference:System.IO.Compression.FileSystem.dll'
+        "/reference:$wv2Core"
+        "/reference:$wv2Forms"
+        $launcher, $versionSource
     )
     & $compiler @compilerArgs
     if ($LASTEXITCODE -ne 0) { throw "Launcher compilation failed ($LASTEXITCODE)." }
