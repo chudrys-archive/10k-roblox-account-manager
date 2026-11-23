@@ -232,6 +232,7 @@ class AccountStore extends EventEmitter {
       try { acc.robux = await api.getRobux(s, acc.userId); } catch {}
     } catch (e) {
       if (e && e.verification) this.markVerification(acc, 'validate');
+      else if (/moderated/i.test(String(e.message))) this.setStatus(acc, 'banned', 'Roblox says this account is moderated, so it cannot join games');
       else if (e instanceof RobloxError && e.status === 401) this.setStatus(acc, 'invalid', 'Cookie expired or revoked - re-login needed');
       else this.setStatus(acc, 'error', e.message);
     }

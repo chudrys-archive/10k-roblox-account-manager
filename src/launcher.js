@@ -12,6 +12,17 @@ const log = logger('launcher');
 const INSTANCES_FILE = path.join(DATA, 'instances.json');
 const LOCK_STATUS = path.join(DATA, 'lockholder.json');
 const LOCK_STOP = path.join(DATA, 'lockholder.stop');
+
+// Roblox keeps the last session's cookie in LocalStorage\RobloxCookies.dat and rewrites it on every start and exit.
+// A client that starts with another account's cookie in that file can have its ticket redeem refused (403).
+// Clearing it right before a start means each client signs in from its own ticket. Running clients keep their
+// session in memory, so this does not touch them.
+function clearClientCookies() {
+  const dir = process.env.IRAM_ROBLOX_DIR || (process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, 'Roblox'));
+  if (!dir) return;
+  try { fs.unlinkSync(path.join(dir, 'LocalStorage', 'RobloxCookies.dat')); }
+  catch (e) { if (e.code !== 'ENOENT') log.warn(`could not clear the Roblox cookie store: ${e.message}`); }
+}
 const GUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
 
 // ---------------- target parsing ----------------
@@ -676,6 +687,7 @@ class Launcher extends EventEmitter {
     this.btids.set(btid, { accountId, at: Date.now(), target });
     this.persist();
 
+    clearClientCookies();
     if (job) job.started = true; // the client is being started now: a cancel from here on has no effect
     log.info(`launching ${name} -> ${target.label || target.type} (${reason}) via ${rbx.via}`);
     try {

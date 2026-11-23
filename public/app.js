@@ -277,7 +277,8 @@ function renderSide() {
 function renderStats() {
   const acc = S.accounts;
   const valid = acc.filter((a) => a.status === 'valid').length;
-  const bad = acc.filter((a) => a.status === 'invalid' || a.status === 'banned').length;
+  const bad = acc.filter((a) => a.status === 'invalid').length;
+  const banned = acc.filter((a) => a.status === 'banned').length;
   const verify = acc.filter((a) => a.status === 'verify').length;
   const inst = S.launcher.instances;
   const mem = inst.reduce((s, i) => s + (i.memMB || 0), 0);
@@ -288,7 +289,7 @@ function renderStats() {
   const afkVal = !afk.enabled ? 'Off' : afk.nextDue ? fmtIn(afk.nextDue) : 'Idle';
   const afkHint = !afk.enabled ? 'clients may be kicked after 20 min' : afk.status || (afk.nextDue ? 'until next nudge' : 'no clients running');
   const cards = [
-    ['users', 'Accounts', acc.length, `${valid} valid${bad ? ` · <span class="err">${bad} need login</span>` : ''}${verify ? ` · <span class="err">${verify} need verification</span>` : ''}`],
+    ['users', 'Accounts', acc.length, `${valid} valid${bad ? ` · <span class="err">${bad} need login</span>` : ''}${banned ? ` \u00b7 <span class="err">${banned} banned</span>` : ''}${verify ? ` · <span class="err">${verify} need verification</span>` : ''}`],
     ['play', 'Running', inst.length, inst.length ? `${(mem / 1024).toFixed(1)} GB RAM · queue ${S.launcher.queued.length}` : `queue ${S.launcher.queued.length}`],
     ['shield', 'Keep-alive', ka.length, kaIssues ? `<span style="color:var(--warn)">${kaIssues} recovering</span>` : 'all healthy'],
     ['zap', 'Anti-AFK', afkVal, esc(afkHint)],

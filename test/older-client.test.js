@@ -11,6 +11,7 @@ test('launches a pinned older client accepted by a fake service', async (t) => {
   const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'iram-older-client-'));
   t.after(() => fs.rmSync(scratch, { recursive: true, force: true }));
   process.env.IRAM_DATA_DIR = scratch;
+  process.env.IRAM_ROBLOX_DIR = path.join(scratch, 'Roblox'); // never touch the real Roblox cookie store
 
   const olderBuild = 'version-0000000000000001';
   const currentBuild = 'version-0000000000000002';
