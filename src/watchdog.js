@@ -156,6 +156,7 @@ class Watchdog extends EventEmitter {
       if (acc.status === 'verify') { this.setStatus(s, 'error', 'needs verification'); continue; }
       if (acc.status === 'invalid' || acc.status === 'banned') { this.setStatus(s, 'error', acc.statusMsg || 'account unusable'); continue; }
       if (this.launcher.pending.has(acc.id)) { this.setStatus(s, 'launching'); continue; }
+      if (this.launcher.isHeld?.(acc.id) && !this.launcher.byAccount(acc.id).length) { this.setStatus(s, 'waiting', 'launch cancelled - not relaunching'); continue; }
 
       const inst = this.launcher.byAccount(acc.id)[0];
       if (inst) {

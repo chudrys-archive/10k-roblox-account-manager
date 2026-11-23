@@ -297,6 +297,7 @@ function renderStats() {
   ];
   const t = `${inst.length ? `(${inst.length}) ` : ''}Isa's Roblox Account Manager`;
   if (document.title !== t) document.title = t;
+  renderQueueBanner();
   $('#stats').innerHTML = cards.map(([ic, l, v, h]) => `<div class="stat"><div class="label">${icon(ic)}${l}</div><div class="val">${v}</div><div class="hint">${h}</div></div>`).join('');
 }
 
@@ -485,12 +486,25 @@ tbody.addEventListener('drop', (e) => {
 });
 tbody.addEventListener('dragend', () => { dragId = null; $$('tr.drag-over', tbody).forEach((x) => x.classList.remove('drag-over')); });
 
+function renderQueueBanner() {
+  const qn = S.launcher.queued.length;
+  let qb = document.getElementById('queue-banner');
+  if (!qn) { if (qb) qb.remove(); return; }
+  if (!qb) { qb = document.createElement('div'); qb.id = 'queue-banner'; qb.className = 'queue-banner'; $('#stats').before(qb); }
+  qb.innerHTML = `<span><span class="dot"></span>${qn} launch${qn === 1 ? '' : 'es'} waiting, started one at a time</span><button class="btn sm" id="cancel-queue">Cancel queued</button>`;
+  bind(qb.querySelector('#cancel-queue'), () => ACT.cancelQueue(null));
+}
+
 // ============================================================ actions
 const ACT = {
   async launch(ids) {
     const { input, jobId } = launchInput();
     const r = await call('/ui/launch', { ids, input, jobId, sameServer: $('#same-server').checked });
     toast('info', `Launching ${r.queued} → ${r.target.label}`);
+  },
+  async cancelQueue(ids) {
+    const r = await call('/ui/launch/cancel', ids ? { ids } : { all: true });
+    toast(r.cancelled ? 'ok' : 'info', r.cancelled ? `Cancelled ${r.cancelled} queued launch${r.cancelled === 1 ? '' : 'es'}` : 'Nothing was waiting to launch');
   },
   async stop(ids) {
     const r = await call('/ui/kill', { ids });
@@ -567,6 +581,7 @@ function menuFor(ids) {
     { icon: 'hop', label: 'Server hop', fn: () => ACT.hop(ids) },
     { icon: 'hop', label: 'Server hop (emptiest server)', fn: () => ACT.hop(ids, true) },
     ...(running ? [{ icon: 'stop', label: 'Stop', fn: () => ACT.stop(ids) }] : []),
+    ...(ids.some((id) => S.launcher.queued.includes(id)) ? [{ icon: 'stop', label: 'Cancel queued launch', fn: () => ACT.cancelQueue(ids) }] : []),
     '-',
     { icon: 'shield', label: kaOn ? 'Keep-alive off' : 'Keep-alive on', fn: () => ACT.keepAlive(ids, !kaOn) },
     { icon: 'zap', label: afkOff ? 'Enable anti-AFK' : 'Disable anti-AFK', fn: () => ACT.antiAfkFor(ids, afkOff) },

@@ -284,6 +284,10 @@ function killUpdaters() {
 }
 
 // ---------------- launcher ----------------
+function cancelledError(accountId) {
+  return Object.assign(new Error('cancelled before it started'), { cancelled: true, accountId });
+}
+
 class Launcher extends EventEmitter {
   constructor({ helper, settings, accounts, guard = null }) {
     super();
@@ -296,6 +300,8 @@ class Launcher extends EventEmitter {
     this.unknown = [];          // Roblox processes we didn't launch
     this.queue = Promise.resolve();
     this.pending = new Map();   // accountId -> promise
+    this.jobs = new Map();   // accountId -> { cancelled, started } for launches still in the queue
+    this.holds = new Map();  // accountId -> time until keep-alive may not relaunch (set by a cancel)
     this.queued = [];           // accountIds waiting
     this.tombstones = new Map(); // pid -> time we killed it (never re-adopt a dying process)
     this.multiStatus = null;
@@ -553,12 +559,19 @@ class Launcher extends EventEmitter {
   /** Queue a launch. Launches run one at a time so process<->account mapping is unambiguous. */
   launch(accountId, target, reason = 'manual', opts = {}) {
     if (this.pending.has(accountId)) return this.pending.get(accountId);
+    if (reason !== 'keep-alive') this.holds.delete(accountId); // a person asking for a launch lifts a cancel hold
+    const job = { accountId, cancelled: false, started: false };
+    this.jobs.set(accountId, job);
     this.queued.push(accountId);
     this.emit('change');
-    const p = this.queue.then(() => this._launch(accountId, target, reason, opts));
+    const p = this.queue.then(() => {
+      if (job.cancelled) throw cancelledError(accountId);
+      return this._launch(accountId, target, reason, opts, job);
+    });
     this.queue = p.catch(() => {});
     const done = () => {
       this.pending.delete(accountId);
+      if (this.jobs.get(accountId) === job) this.jobs.delete(accountId);
       this.queued = this.queued.filter((x) => x !== accountId);
       this.emit('change');
     };
@@ -567,10 +580,39 @@ class Launcher extends EventEmitter {
     return p;
   }
 
-  async _launch(accountId, target, reason, opts = {}) {
+  /** Cancel launches still waiting in the queue (ids = null cancels all). A cancelled account is not relaunched by keep-alive for 10 min. Returns how many. */
+  cancelQueued(ids = null) {
+    const want = ids ? new Set(ids) : null;
+    let n = 0;
+    for (const [accountId, job] of this.jobs) {
+      if (want && !want.has(accountId)) continue;
+      if (job.cancelled || job.started) continue; // a client already being started cannot be cancelled
+      job.cancelled = true;
+      this.holds.set(accountId, Date.now() + 10 * 60000);
+      n++;
+    }
+    if (n) {
+      this.queued = this.queued.filter((id) => !this.jobs.get(id)?.cancelled);
+      log.info(`cancelled ${n} queued launch(es)`);
+      this.emit('change');
+    }
+    return n;
+  }
+
+  /** True while keep-alive relaunches of this account are paused by a cancel. */
+  isHeld(accountId) {
+    const until = this.holds.get(accountId);
+    if (!until) return false;
+    if (Date.now() > until) { this.holds.delete(accountId); return false; }
+    return true;
+  }
+
+  async _launch(accountId, target, reason, opts = {}, job = null) {
+    const stillWanted = () => { if (job && job.cancelled) throw cancelledError(accountId); };
     const acc = this.accounts.get(accountId);
     if (!acc) throw new Error('account no longer exists');
     const name = acc.username;
+    stillWanted();
     if (this.guard && this.guard.blocks(reason)) {
       throw Object.assign(new Error(`${name}: automatic launch skipped, the captcha guard has paused automation`), { guardPaused: true });
     }
@@ -610,16 +652,24 @@ class Launcher extends EventEmitter {
     let ticket;
     try { ticket = await api.getAuthTicket(session); } catch (e) {
       if (e && e.verification) this.accounts.markVerification(acc, 'sign-in ticket');
+      if (e && /moderat/i.test(String(e.message))) {
+        // Roblox refuses tickets for moderated accounts. Retrying every 30 s only adds requests, so stop the account.
+        this.accounts.setStatus(acc, 'banned', 'Roblox says this account is moderated, so it cannot join games');
+        this.accounts.update(accountId, { keepAlive: { enabled: false } });
+        this.accounts.save();
+      }
       if (e instanceof RobloxError && e.status === 401) {
         this.accounts.setStatus(acc, 'invalid', 'Cookie expired or revoked - re-login needed'); this.accounts.save();
       }
       throw e;
     }
+    stillWanted();
     const btid = `${Date.now()}${crypto.randomInt(100, 999)}`;
     const uri = launchUri(ticket, placeLauncherUrl(target, btid), btid);
     this.btids.set(btid, { accountId, at: Date.now(), target });
     this.persist();
 
+    if (job) job.started = true; // the client is being started now: a cancel from here on has no effect
     log.info(`launching ${name} -> ${target.label || target.type} (${reason}) via ${rbx.via}`);
     try {
       const child = spawn(rbx.path, [uri], { detached: true, stdio: 'ignore', windowsHide: false,
@@ -772,7 +822,7 @@ class Launcher extends EventEmitter {
   async launchMany(ids, target, { sameServer = false, reason = 'manual' } = {}) {
     const results = [];
     if (!sameServer || target.type !== 'game' || ids.length < 2) {
-      const ps = ids.map((id) => this.launch(id, target, reason).then((r) => ({ id, ok: true, ...r }), (e) => ({ id, ok: false, error: e.message })));
+      const ps = ids.map((id) => this.launch(id, target, reason).then((r) => ({ id, ok: true, ...r }), (e) => ({ id, ok: false, error: e.message, cancelled: !!e.cancelled })));
       return Promise.all(ps);
     }
     const [first, ...rest] = ids;
@@ -791,7 +841,7 @@ class Launcher extends EventEmitter {
     }
     const t2 = jobId ? { type: 'job', placeId: target.placeId, jobId, label: `${target.placeId} / ${jobId.slice(0, 8)}` } : { type: 'follow', userId: acc.userId, label: `Follow ${acc.username}` };
     log.info(jobId ? `same-server: joining ${jobId}` : 'same-server: could not read JobId, following first account instead');
-    const ps = rest.map((id) => this.launch(id, t2, reason).then((r) => ({ id, ok: true, ...r }), (e) => ({ id, ok: false, error: e.message })));
+    const ps = rest.map((id) => this.launch(id, t2, reason).then((r) => ({ id, ok: true, ...r }), (e) => ({ id, ok: false, error: e.message, cancelled: !!e.cancelled })));
     return results.concat(await Promise.all(ps));
   }
 
