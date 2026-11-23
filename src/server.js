@@ -86,6 +86,25 @@ class Server {
     });
   }
 
+  // Local-only channel for the capture extension's native host. Needs the capture token from manager.lock.
+  handleCapture(req, res, p) {
+    const tok = String(req.headers['x-capture-token'] || '');
+    const want = this.ctx.capture.token;
+    const ok = tok.length === want.length && crypto.timingSafeEqual(Buffer.from(tok), Buffer.from(want));
+    if (!ok) return this.send(res, 401, { error: 'bad capture token' });
+    if (req.method === 'GET' && p === '/capture/status') {
+      this.ctx.capture.touch();
+      return this.send(res, 200, this.ctx.capture.status());
+    }
+    if (req.method === 'POST' && p === '/capture/offer') {
+      return this.readBody(req).then(
+        (body) => this.send(res, 200, { accepted: this.ctx.capture.offer(body && body.cookie) }),
+        () => this.send(res, 400, { error: 'bad body' }),
+      );
+    }
+    return this.send(res, 404, { error: 'no such capture route' });
+  }
+
   route(method, pattern, handler, opts = {}) {
     const keys = [];
     const re = new RegExp('^' + pattern.replace(/:(\w+)/g, (_, k) => { keys.push(k); return '([^/]+)'; }) + '$');
@@ -104,6 +123,7 @@ class Server {
         res.writeHead(302, { 'Set-Cookie': `iram_t=${this.token}; HttpOnly; SameSite=Strict; Path=/`, Location: '/' });
         return res.end();
       }
+      if (p.startsWith('/capture/')) return this.handleCapture(req, res, p);
       if (req.method === 'GET' && !p.startsWith('/ui/') && !p.startsWith('/api/')) return this.static(req, res, p);
 
       if (p.startsWith('/api/')) return this.handleApi(req, res, url);
@@ -229,8 +249,12 @@ class Server {
     this.route('POST', '/ui/accounts/login', async ({ body }) => {
       const run = async (entry) => {
         try {
-          this.toast('info', `Login window opened${entry.username ? ` for ${entry.username}` : ''} - complete any captcha / 2FA there.`);
-          const cookie = await c.browser.login(entry);
+          this.toast('info', `Chrome opened a login window${entry.username ? ` for ${entry.username}` : ''}. Log in there and the account is added automatically.`);
+          const notConnected = setTimeout(() => {
+            if (!c.capture.connected()) this.toast('warn', `Capture extension is not connected. In Chrome open chrome://extensions, turn on Developer mode, click Load unpacked and pick ${c.captureExtDir}`);
+          }, 8000);
+          let cookie;
+          try { cookie = await c.browser.login(entry); } finally { clearTimeout(notConnected); }
           const { account } = await c.accounts.addCookie(cookie, { group: body.group || undefined, password: body.savePasswords ? entry.password : undefined });
           this.toast('ok', `Logged in as ${account.username}`);
           return true;

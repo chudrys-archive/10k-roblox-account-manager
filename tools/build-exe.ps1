@@ -51,6 +51,8 @@ try {
             Where-Object Extension -In '.html', '.css', '.js', '.png'
         $inputs += $sourceFiles | ForEach-Object { @{ Path = $_.FullName; Entry = "src/$($_.Name)" } }
         $inputs += $publicFiles | ForEach-Object { @{ Path = $_.FullName; Entry = "public/$($_.Name)" } }
+$extFiles = Get-ChildItem -LiteralPath (Join-Path $root 'tools\chrome-extension') -File
+$inputs += $extFiles | ForEach-Object { @{ Path = $_.FullName; Entry = "extension/$($_.Name)" } }
         foreach ($inputFile in $inputs) {
             [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
                 $archive, $inputFile.Path, $inputFile.Entry, 'Optimal') | Out-Null

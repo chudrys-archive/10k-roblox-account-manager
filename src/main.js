@@ -16,6 +16,8 @@ const { Server } = require('./server');
 const { AntiAfk } = require('./antiafk');
 const { CaptchaGuard } = require('./captchaguard');
 const { UpdateChecker } = require('./updatecheck');
+const { CaptureGate } = require('./capture');
+const { registerCapture, captureBase } = require('./nativehost');
 const { History } = require('./history');
 
 const log = logger('main');
@@ -117,7 +119,8 @@ async function main() {
   const alerts = new Alerts({ settings });
   const logwatch = new LogWatcher({ launcher });
   const watchdog = new Watchdog({ launcher, accounts, settings, logwatch, alerts, guard });
-  const browser = new BrowserManager({ settings, accounts });
+  const capture = new CaptureGate();
+  const browser = new BrowserManager({ settings, accounts, capture });
   const antiAfk = new AntiAfk({ helper, launcher, settings, accounts });
   accounts.on('invalid', (acc) => alerts.send('invalid', `${acc.username}: login needed`, `${acc.statusMsg || 'The saved session is no longer valid.'}\nRe-login from the account's Details.`, { level: 'error', key: acc.id }));
   settings.on('change', (s) => applyAutostart(s.startWithWindows));
@@ -158,10 +161,11 @@ async function main() {
 
   const updates = new UpdateChecker();
 updates.start();
-const ctx = { settings, vault, accounts, launcher, watchdog, browser, antiAfk, alerts, guard, history, onUnlocked, createShortcut, updates };
+const ctx = { settings, vault, accounts, launcher, watchdog, browser, antiAfk, alerts, guard, history, onUnlocked, createShortcut, updates, capture, captureExtDir: path.join(captureBase(DATA), 'extension') };
   const server = new Server(ctx);
   const port = await server.listen();
-  atomicWrite(LOCK, JSON.stringify({ pid: process.pid, port, token: server.token }));
+  registerCapture({ dataDir: DATA }).catch((e) => require('./util').logger('capture-host').error(e.message));
+  atomicWrite(LOCK, JSON.stringify({ pid: process.pid, port, token: server.token, captureToken: capture.token }));
 
   if (!vault.locked) { accounts.load(); onUnlocked(); }
   await launcher.init();

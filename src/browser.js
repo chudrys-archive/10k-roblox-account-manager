@@ -7,7 +7,7 @@ const { DATA, logger, sleep, rmrf, uuid } = require('./util');
 const { api } = require('./roblox');
 const log = logger('browser');
 
-/** Minimal Chrome DevTools Protocol client over Node's built-in WebSocket. */
+/** Minimal Chrome DevTools Protocol client over Node's built-in WebSocket. Used only for the check and session windows. */
 class CDP extends EventEmitter {
   static connect(url) {
     return new Promise((resolve, reject) => {
@@ -63,7 +63,36 @@ function findBrowser(override) {
   return cands.find((c) => fs.existsSync(c)) || null;
 }
 
-/** Start an isolated browser (throwaway profile) with DevTools enabled. */
+/** Your browser's user-data folder, for the browser we open logins in. */
+function userDataDir(exe) {
+  const la = process.env.LOCALAPPDATA || '';
+  if (/msedge\.exe$/i.test(exe)) return path.join(la, 'Microsoft', 'Edge', 'User Data');
+  if (/brave\.exe$/i.test(exe)) return path.join(la, 'BraveSoftware', 'Brave-Browser', 'User Data');
+  return path.join(la, 'Google', 'Chrome', 'User Data');
+}
+
+/** The profile you used last in that browser, else Default. */
+function loginProfile(exe) {
+  const root = userDataDir(exe);
+  try {
+    const last = JSON.parse(fs.readFileSync(path.join(root, 'Local State'), 'utf8')).profile?.last_used;
+    if (last && fs.existsSync(path.join(root, last))) return last;
+  } catch { /* no Local State yet */ }
+  return 'Default';
+}
+
+/** Opens roblox.com/login in a new window of your own profile. No DevTools, no autofill, no automation flags. */
+function openLoginWindow(settings, url = 'https://www.roblox.com/login') {
+  const exe = findBrowser(settings.get('browserPath'));
+  if (!exe) throw new Error('No Chrome or Edge found. Set a browser path in Settings.');
+  const profile = loginProfile(exe);
+  const child = spawn(exe, [`--profile-directory=${profile}`, '--new-window', url], { detached: true, stdio: 'ignore' });
+  child.on('error', (e) => log.error('login window: ' + e.message));
+  child.unref();
+  return profile;
+}
+
+/** Start an isolated browser (throwaway profile) with DevTools enabled. Used for session windows only. */
 async function openBrowser(settings, startUrl = 'about:blank') {
   const exe = findBrowser(settings.get('browserPath'));
   if (!exe) throw new Error('No Chromium browser found (Edge/Chrome). Set a browser path in Settings.');
@@ -112,69 +141,35 @@ async function getRobloxCookie(cdp) {
   return c ? c.value : null;
 }
 
-const FILL_JS = `(function(u,p){
-  const a=document.querySelector('#login-username, input[name=username]');
-  const b=document.querySelector('#login-password, input[name=password]');
-  if(!a||!b) return false;
-  const set=(el,v)=>{const d=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value');d.set.call(el,v);
-    el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));};
-  set(a,u); set(b,p);
-  const btn=document.querySelector('#login-button');
-  if(btn) setTimeout(()=>btn.click(),300);
-  return true;})`;
-
 class BrowserManager {
-  constructor({ settings, accounts }) {
+  constructor({ settings, accounts, capture }) {
     this.settings = settings;
     this.accounts = accounts;
+    this.capture = capture;
     this.active = new Map(); // jobId -> {kind, label, close}
   }
 
   list() { return [...this.active.entries()].map(([id, v]) => ({ id, kind: v.kind, label: v.label })); }
 
   /**
-   * Opens a real login window. If credentials are given they are typed in for you.
-   * As soon as Roblox issues a session cookie it is captured and the window closes.
+   * Opens roblox.com/login in your own Chrome profile (a new window) and waits for the capture extension to hand
+   * over the Roblox cookie. Resolves with the cookie. Nothing is stored here: the caller decides what to do with it.
    */
-  async login({ username = '', password = '', timeoutMin = 10 } = {}) {
-    const b = await openBrowser(this.settings, 'https://www.roblox.com/login');
+  async login({ username = '', timeoutMin = 10 } = {}) {
+    const label = username || 'new login';
     const id = uuid();
-    this.active.set(id, { kind: 'login', label: username || 'new login', close: b.close });
+    const wait = this.capture.arm({ timeoutMs: timeoutMin * 60000, label });
+    wait.catch(() => {});
+    this.active.set(id, { kind: 'login', label, close: () => this.capture.cancel('cancelled') });
     try {
-      if (username && password) this._autofill(b.cdp, username, password).catch((e) => log.debug('autofill: ' + e.message));
-
-      const until = Date.now() + timeoutMin * 60000;
-      while (Date.now() < until) {
-        if (b.cdp.closed) throw new Error('Login window was closed');
-        let cookie = null;
-        try { cookie = await getRobloxCookie(b.cdp); } catch (e) { if (b.cdp.closed) throw new Error('Login window was closed'); }
-        if (cookie) {
-          try { await api.getAuthenticated({ cookie }); } catch { await sleep(1000); continue; } // not fully logged in yet
-          return cookie;
-        }
-        await sleep(1000);
-      }
-      throw new Error('Login timed out');
+      openLoginWindow(this.settings);
+      return await wait;
+    } catch (e) {
+      this.capture.cancel('cancelled');
+      throw e;
     } finally {
       this.active.delete(id);
-      await b.close();
     }
-  }
-
-  async _autofill(cdp, username, password) {
-    const until = Date.now() + 30000;
-    while (Date.now() < until && !cdp.closed) {
-      try {
-        const sid = await pageSession(cdp, /roblox\.com\/login/);
-        if (sid) {
-          const expr = `${FILL_JS}(${JSON.stringify(username)},${JSON.stringify(password)})`;
-          const r = await cdp.send('Runtime.evaluate', { expression: expr, returnByValue: true }, sid);
-          if (r.result && r.result.value === true) return true;
-        }
-      } catch {}
-      await sleep(1000);
-    }
-    return false;
   }
 
   /** Open roblox.com logged in as the account in an isolated window. Cookie rotations are synced back. */
@@ -212,4 +207,4 @@ class BrowserManager {
   async closeAll() { for (const [, v] of this.active) await v.close().catch(() => {}); this.active.clear(); }
 }
 
-module.exports = { BrowserManager, findBrowser, openBrowser, CDP };
+module.exports = { BrowserManager, findBrowser, openBrowser, openLoginWindow, loginProfile, CDP };
