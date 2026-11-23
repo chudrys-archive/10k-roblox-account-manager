@@ -586,6 +586,19 @@ class Launcher extends EventEmitter {
     }
   }
 
+  /** Multi-instance: wait until every other client started here has been up long enough to finish signing in. */
+  async waitForSignInsSettled(accountId, job) {
+    const settleMs = 60 * 1000;
+    const deadline = Date.now() + 10 * 60 * 1000;
+    for (;;) {
+      if (job && job.cancelled) throw cancelledError(accountId);
+      const signingIn = [...this.instances.values()].filter((i) => i.accountId !== accountId && Date.now() - (i.startedAt || 0) < settleMs);
+      if (!signingIn.length) return;
+      if (Date.now() >= deadline) throw new Error('Another client is still signing in, so this launch was not started.');
+      await sleep(1000);
+    }
+  }
+
   launch(accountId, target, reason = 'manual', opts = {}) {
     if (this.pending.has(accountId)) return this.pending.get(accountId);
     if (['manual', 'rejoin', 'restart', 'hop'].includes(reason)) this.holds.delete(accountId); // only a person asking lifts a stop/cancel hold
@@ -681,7 +694,12 @@ class Launcher extends EventEmitter {
       if (rbx.testBuild) setUpdatersBlocked(true, [{ dir: path.dirname(rbx.path) }]);
     }
 
-    await this.assertNoOtherClient();
+    if (this.settings.get('multiInstance') && this.multiActive) {
+      // With the lock held, several clients may run, but two accounts never sign in at the same moment.
+      await this.waitForSignInsSettled(accountId, job);
+    } else {
+      await this.assertNoOtherClient();
+    }
     // Read the process list before minting the ticket, not between minting and launching: a slow helper
     // call in between would leave the ticket stale by the time the client redeems it.
     const before = new Set((await this.helper.procs()).map((p) => p.pid));
