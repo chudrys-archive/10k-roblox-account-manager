@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "description": "Hands the Roblox login cookie to your local Isa Roblox Account Manager while it is waiting for a login.",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAqbNTaCx8b/0flFUh6zyVMjgEnnkrCNlvoPi4VhmZtQhLPMzKwScjMQ5Acn5DedCeu6mO72ogNr85cZYgSzHyiIKXBOZWFXl49OBco/bquJpEq1YDHfE4ZRUUDVoszlNsfsmCa4Yi7uYCrt3c+1ov8s8iXsCgN7togVbGd7L7o8cq94po5k5riVp6gKgZttcmSfibbe8IJhQFgtKragH+kb40vMUj+S/XhHSgEjI9IFJxUvpDLnqJYGRsqbpg1NNTT8VALsI6iM53iaR9vo12ycsYj0t5eEzUga0rMLJ1JtyQktG3glN54RX9++O1ZeVIqDdU0FbD1Cf9pwr3BJcTfwIDAQAB",
-  "permissions": ["cookies", "nativeMessaging", "alarms"],
+  "permissions": ["cookies", "nativeMessaging", "alarms", "scripting"],
   "host_permissions": ["https://www.roblox.com/*"],
   "background": { "service_worker": "background.js" }
 }

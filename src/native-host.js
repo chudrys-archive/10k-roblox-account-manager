@@ -67,6 +67,7 @@ function main() {
   const dataDir = process.env.IRAM_DATA_DIR || '';
   let readPending = false;
   let lastReadAt = 0;
+  let openedFor = null; // quick login: the login window is asked for once per login
   const send = (obj) => process.stdout.write(encode(obj));
   const decoder = new FrameDecoder();
 
@@ -74,13 +75,26 @@ function main() {
     let msgs;
     try { msgs = decoder.push(chunk); } catch { process.exit(1); return; }
     for (const m of msgs) {
+      if (m && m.type === 'qr') {
+        // the QR code of a quick login, passed on to the manager to show. It is not stored on disk.
+        const lock = readLock(dataDir);
+        if (lock && typeof m.src === 'string') request(lock, 'POST', '/capture/qr', { src: m.src }).catch(() => {});
+        continue;
+      }
+      if (m && m.type === 'closed') {
+        // the person closed the login window by hand before a cookie was captured: stop waiting for it
+        const lock = readLock(dataDir);
+        if (lock) request(lock, 'POST', '/capture/closed', {}).catch(() => {});
+        continue;
+      }
       if (!m || m.type !== 'cookie') continue;
       readPending = false;
       const lock = readLock(dataDir);
       if (!lock) continue;
       const value = typeof m.value === 'string' && m.value ? m.value : null;
       try {
-        const r = await request(lock, 'POST', '/capture/offer', { cookie: value });
+        const tabs = typeof m.tabs === 'number' ? m.tabs : null;
+        const r = await request(lock, 'POST', '/capture/offer', { cookie: value, tabs });
         if (r && r.accepted) send({ type: 'close' });
       } catch { /* manager gone */ }
     }
@@ -92,11 +106,15 @@ function main() {
     if (!lock) { readPending = false; return; }
     let st;
     try { st = await request(lock, 'GET', '/capture/status'); } catch { return; }
-    if (!st || !st.armed) { readPending = false; return; }
+    if (!st || !st.armed) { readPending = false; openedFor = null; return; }
+    if (st.qr && st.until !== openedFor) {
+      openedFor = st.until;
+      send({ type: 'open', url: 'https://www.roblox.com/login' });
+    }
     if (readPending && Date.now() - lastReadAt < READ_GAP_MS) return;
     readPending = true;
     lastReadAt = Date.now();
-    send({ type: 'read' });
+    send({ type: 'read', qr: !!st.qr });
   }, POLL_MS);
 }
 

@@ -155,14 +155,14 @@ class BrowserManager {
    * Opens roblox.com/login in your own Chrome profile (a new window) and waits for the capture extension to hand
    * over the Roblox cookie. Resolves with the cookie. Nothing is stored here: the caller decides what to do with it.
    */
-  async login({ username = '', timeoutMin = 10, url = 'https://www.roblox.com/login', label: given = '' } = {}) {
+  async login({ username = '', timeoutMin = 10, url = 'https://www.roblox.com/login', label: given = '', qr = false, open = true } = {}) {
     const label = given || username || 'new login';
     const id = uuid();
-    const wait = this.capture.arm({ timeoutMs: timeoutMin * 60000, label });
+    const wait = this.capture.arm({ timeoutMs: timeoutMin * 60000, label, qr });
     wait.catch(() => {});
     this.active.set(id, { kind: 'login', label, close: () => this.capture.cancel('cancelled') });
     try {
-      openLoginWindow(this.settings, url);
+      if (open) openLoginWindow(this.settings, url);
       return await wait;
     } catch (e) {
       this.capture.cancel('cancelled');

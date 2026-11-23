@@ -96,9 +96,24 @@ class Server {
       this.ctx.capture.touch();
       return this.send(res, 200, this.ctx.capture.status());
     }
+    if (req.method === 'POST' && p === '/capture/qr') {
+      return this.readBody(req).then(
+        (body) => this.send(res, 200, { ok: this.ctx.capture.setQr(body && body.src) }),
+        () => this.send(res, 400, { error: 'bad body' }),
+      );
+    }
+    if (req.method === 'POST' && p === '/capture/closed') {
+      // the login window was closed by hand: stop waiting for it so the next login isn't blocked
+      this.ctx.capture.cancel('window closed');
+      return this.send(res, 200, { ok: true });
+    }
     if (req.method === 'POST' && p === '/capture/offer') {
       return this.readBody(req).then(
-        (body) => this.send(res, 200, { accepted: this.ctx.capture.offer(body && body.cookie) }),
+        (body) => {
+          const accepted = this.ctx.capture.offer(body && body.cookie);
+          if (!accepted && body && typeof body.tabs === 'number') this.ctx.capture.noteTabs(body.tabs);
+          return this.send(res, 200, { accepted });
+        },
         () => this.send(res, 400, { error: 'bad body' }),
       );
     }
@@ -247,6 +262,9 @@ class Server {
     });
 
     this.route('POST', '/ui/accounts/login', async ({ body }) => {
+      // one login window at a time: a second one would supersede the first, and the bulk loop would then fail that account
+      if (c.capture.armed() || c.browser.list().some((b) => b.kind === 'login')) return { started: 0, busy: true };
+      let stopBulk = false; // set when the person closes the login window by hand
       const run = async (entry) => {
         try {
           this.toast('info', `Chrome opened a login window${entry.username ? ` for ${entry.username}` : ''}. Log in there and the account is added automatically.`);
@@ -262,6 +280,7 @@ class Server {
           return true;
         } catch (e) {
           this.toast('error', `Login${entry.username ? ` (${entry.username})` : ''} failed: ${e.message}`);
+          if (e.windowClosed) stopBulk = true;
           return false;
         }
       };
@@ -276,7 +295,12 @@ class Server {
       // sequential in background: one window at a time
       (async () => {
         let ok = 0;
-        for (const e of entries) if (await run(e)) ok++;
+        for (let i = 0; i < entries.length; i++) {
+          if (await run(entries[i])) ok++;
+          if (stopBulk) break;
+          // short random pause between accounts: back-to-back logins from one network look like bot traffic to Roblox
+          if (i < entries.length - 1) await sleep(6000 + Math.random() * 6000);
+        }
         if (entries.length > 1) this.toast('ok', `Bulk login finished: ${ok}/${entries.length}`);
       })();
       return { started: entries.length };
@@ -301,6 +325,28 @@ class Server {
 
     // Check window: log into one account in a separate window and see whether it is banned. Nothing is added to the
     // list. One check (or other login window) at a time.
+    // Quick login: opens roblox.com/login in your own Chrome, switches to the QR code, and shows it here. Approve it on a
+    // phone that is already signed into the account; the login is captured the same way as a normal login.
+    this.route('POST', '/ui/accounts/quick-login', async ({ body }) => {
+      if (c.capture.armed() || c.browser.list().some((b) => b.kind === 'login')) return { started: false, busy: true };
+      (async () => {
+        try {
+          this.toast('info', 'Chrome opens the Roblox login page with the QR code. Approve it on your phone.');
+          const notConnected = setTimeout(() => {
+            if (!c.capture.connected()) this.toast('warn', 'Capture extension is not connected, so the quick login window cannot open. Turn on the extension in chrome://extensions.');
+          }, 8000);
+          let cookie;
+          try { cookie = await c.browser.login({ label: 'quick login', qr: true, open: false }); } finally { clearTimeout(notConnected); }
+          const { account, created } = await c.accounts.addCookie(cookie, { group: (body && body.group) || undefined, keepExisting: true });
+          this.toast('ok', created ? `Added ${account.username}` : `${account.username} is already in your list. Cookie refreshed.`);
+        } catch (e) {
+          this.toast('error', `Quick login: ${e.message}`);
+        }
+      })();
+      return { started: true };
+    });
+    this.route('POST', '/ui/accounts/quick-login/state', () => c.capture.qrState());
+
     let checkOpen = false;
     this.route('POST', '/ui/accounts/check-login', () => {
       if (checkOpen || c.browser.list().some((b) => b.kind === 'login')) return { started: false, busy: true };

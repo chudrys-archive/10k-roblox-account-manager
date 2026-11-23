@@ -834,7 +834,7 @@ bind($('#btn-fav-add'), async () => {
 // ============================================================ add account
 bind($('#btn-add'), async () => {
   const d = openDialog(`<h2>Add accounts</h2>
-    <div class="chips" style="margin:10px 0 4px" id="add-tabs"><span class="chip on" data-t="login">Browser login</span><span class="chip" data-t="bulk">Bulk login</span><span class="chip" data-t="cookie">Import cookies</span></div>
+    <div class="chips" style="margin:10px 0 4px" id="add-tabs"><span class="chip on" data-t="login">Browser login</span><span class="chip" data-t="bulk">Bulk login</span><span class="chip" data-t="quick">Quick login</span><span class="chip" data-t="cookie">Import cookies</span></div>
     <div data-pane="login">
       <p class="lead">A clean, private browser window opens on roblox.com. Log in normally and solve any captcha or 2FA yourself; the session is captured the moment you're in and the window closes.</p>
       <div class="grid2"><div><label class="f">Username (optional)</label><input id="lg-user" autocomplete="off"></div>
@@ -845,6 +845,11 @@ bind($('#btn-add'), async () => {
       <p class="lead">One <code>username:password</code> per line. Windows open one at a time with the details typed in, so you only solve captchas. Closing a window skips that account.</p>
       <textarea id="bl-lines" placeholder="user1:password1&#10;user2:password2"></textarea>
       <div class="toggle-row"><label class="switch"><input type="checkbox" id="bl-save" checked><span></span></label><div class="txt">Save passwords in the encrypted vault</div></div>
+    </div>
+    <div data-pane="quick" class="hidden">
+      <p class="lead">Chrome opens on the Roblox login page with the QR code already showing. Scan it with a phone that is already signed into the account and approve the request; the account is added automatically.</p>
+      <div style="text-align:center"><img id="qr-img" alt="" style="width:220px;height:220px;background:#fff;padding:8px;border-radius:8px"></div>
+      <div id="qr-status" class="small" style="text-align:center"></div>
     </div>
     <div data-pane="cookie" class="hidden">
       <p class="lead">Paste one per line: raw <code>.ROBLOSECURITY</code> values, <code>user:pass:cookie</code>, or any text containing the cookie. Existing accounts are updated, never duplicated.</p>
@@ -860,16 +865,29 @@ bind($('#btn-add'), async () => {
     tab = c.dataset.t;
     $$('#add-tabs .chip', d).forEach((x) => x.classList.toggle('on', x === c));
     $$('[data-pane]', d).forEach((p) => p.classList.toggle('hidden', p.dataset.pane !== tab));
-    $('#add-go', d).textContent = { login: 'Open login window', bulk: 'Start bulk login', cookie: 'Import' }[tab];
+    $('#add-go', d).textContent = { login: 'Open login window', bulk: 'Start bulk login', quick: 'Show QR code', cookie: 'Import' }[tab];
   });
   bind($('#add-go', d), async () => {
     const group = $('#add-group', d).value.trim();
     if (tab === 'login') {
-      await call('/ui/accounts/login', { username: $('#lg-user', d).value.trim(), password: $('#lg-pass', d).value, savePasswords: $('#lg-save', d).checked, group });
+      const r = await call('/ui/accounts/login', { username: $('#lg-user', d).value.trim(), password: $('#lg-pass', d).value, savePasswords: $('#lg-save', d).checked, group });
+      if (r && r.busy) { toast('info', 'A login window is already open. Finish or close it first.'); return; }
       closeDialog();
     } else if (tab === 'bulk') {
       const r = await call('/ui/accounts/login', { lines: $('#bl-lines', d).value, savePasswords: $('#bl-save', d).checked, group });
+      if (r && r.busy) { toast('info', 'A login window is already open. Finish or close it first.'); return; }
       toast('info', `Bulk login started for ${r.started} account(s)`); closeDialog();
+    } else if (tab === 'quick') {
+      const r = await call('/ui/accounts/quick-login', { group });
+      if (r && r.busy) { toast('info', 'A login window is already open. Finish or close it first.'); return; }
+      $('#add-go', d).disabled = true;
+      $('#qr-status', d).textContent = 'Waiting for you to approve the code on your phone...';
+      const iv = setInterval(async () => {
+        if (!document.body.contains(d)) return clearInterval(iv);
+        const q = await call('/ui/accounts/quick-login/state', {});
+        if (q && q.src) $('#qr-img', d).src = q.src;
+        if (q && !q.armed) { clearInterval(iv); closeDialog(); }
+      }, 2000);
     } else {
       const r = await call('/ui/accounts/import', { text: $('#ck-text', d).value, group });
       $('#ck-res', d).innerHTML = `<span class="okc">Added ${r.added}, updated ${r.updated}.</span>` + (r.failed.length ? `<div class="err">${r.failed.map(esc).join('<br>')}</div>` : '');
@@ -926,7 +944,11 @@ function openDetails(id) {
   bind($('#d-validate', d), async () => { await ACT.validate([id]); closeDialog(); });
   bind($('#d-refresh', d), async () => { await call(`/ui/accounts/${id}/refresh-cookie`, {}); toast('ok', 'Cookie refreshed'); });
   bind($('#d-reveal', d), () => ACT.revealCookie(id));
-  bind($('#d-relogin', d), async () => { await call('/ui/accounts/login', { username: a.username, password: '', group: a.group }); closeDialog(); });
+  bind($('#d-relogin', d), async () => {
+  const r = await call('/ui/accounts/login', { username: a.username, password: '', group: a.group });
+  if (r && r.busy) { toast('info', 'A login window is already open. Finish or close it first.'); return; }
+  closeDialog();
+});
   bind($('#d-logout', d), async () => {
     if (!await confirmDialog('Sign this session out?', 'The stored cookie is revoked on Roblox. You will need to log this account in again.', { ok: 'Sign out', danger: true })) return;
     await call(`/ui/accounts/${id}/logout`, {}); toast('ok', 'Signed out');
