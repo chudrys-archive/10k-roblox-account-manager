@@ -387,11 +387,22 @@ class Launcher extends EventEmitter {
         if (n) log.warn(`closed ${n} Roblox updater process(es) ("Don't update Roblox" is on)`);
       }
       const procs = await this.helper.procs();
+      // The helper can briefly return an empty list (restart, busy WMI). Treating that as "every client
+      // closed" dropped all instances at once, and keep-alive then relaunched clients still running.
+      // Two empty reads in a row are needed before anything is reconciled.
+      if (!procs.length && this.instances.size) {
+        this.emptyReads = (this.emptyReads || 0) + 1;
+        if (this.emptyReads < 2) return;
+      } else {
+        this.emptyReads = 0;
+      }
       const live = new Map(procs.map((p) => [p.pid, p]));
       let changed = false;
       for (const [pid, inst] of this.instances) {
         const p = live.get(pid);
-        if (!p || (inst.btid && p.btid && p.btid !== inst.btid)) {
+        const mismatch = !!(p && inst.btid && p.btid && p.btid !== inst.btid);
+        if (p && !mismatch) inst.missing = 0;
+        if (!p || mismatch) {
           // Roblox's starter process often relaunches itself (new PID, same launch args).
           // Hand the instance over silently instead of reporting a crash.
           const heir = inst.btid && !inst.killReason && procs.find((q) => q.btid === inst.btid && q.pid !== pid && !this.instances.has(q.pid) && !this.isTombstoned(q));
@@ -404,6 +415,9 @@ class Launcher extends EventEmitter {
             log.info(`pid ${pid} handed off to ${heir.pid} (${this.accounts.get(inst.accountId)?.username || inst.accountId})`);
             continue;
           }
+          // one missed read is not an exit: wait for a second consecutive miss
+          inst.missing = (inst.missing || 0) + 1;
+          if (!inst.killReason && inst.missing < 2) continue;
           if (inst.btid && !inst.killReason && Date.now() - inst.startedAt < 20000) {
             // just launched: give the relaunched process a moment to appear before declaring exit
             continue;
@@ -569,6 +583,9 @@ class Launcher extends EventEmitter {
       if (rbx.testBuild) setUpdatersBlocked(true, [{ dir: path.dirname(rbx.path) }]);
     }
 
+    // Read the process list before minting the ticket, not between minting and launching: a slow helper
+    // call in between would leave the ticket stale by the time the client redeems it.
+    const before = new Set((await this.helper.procs()).map((p) => p.pid));
     const session = this.accounts.session(acc);
     let ticket;
     try { ticket = await api.getAuthTicket(session); } catch (e) {
@@ -583,7 +600,6 @@ class Launcher extends EventEmitter {
     this.btids.set(btid, { accountId, at: Date.now(), target });
     this.persist();
 
-    const before = new Set((await this.helper.procs()).map((p) => p.pid));
     log.info(`launching ${name} -> ${target.label || target.type} (${reason}) via ${rbx.via}`);
     try {
       const child = spawn(rbx.path, [uri], { detached: true, stdio: 'ignore', windowsHide: false,
