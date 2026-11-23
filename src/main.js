@@ -24,17 +24,17 @@ const noUi = process.argv.includes('--no-ui');
 function alive(pid) { try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } }
 
 /**
- * Kill any existing Edge app-mode windows pointing to our local server so the
+ * Kill the Edge app window left over from an earlier run (matched by its own profile, never the user's Edge) so the
  * next openUi call always opens a fresh window at the correct URL and token.
  * Edge app-mode reuses windows by origin (scheme+host+port); if the manager
  * restarts on the same port with a new token, Edge would otherwise focus the
  * stale window and show "not found".
  */
-function killStaleEdgeAppWindows() {
+function killStaleEdgeAppWindows(profile) {
   try {
     execFileSync('powershell.exe', [
       '-NoProfile', '-NonInteractive', '-Command',
-      "Get-CimInstance Win32_Process -Filter \"Name='msedge.exe'\" | Where-Object { $_.CommandLine -like '*--app=http://127.0.0.1:*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }",
+      `Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*--user-data-dir=${profile}*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`,
     ], { windowsHide: true, stdio: 'ignore', timeout: 5000 });
   } catch { /* ignore — no stale windows, or PowerShell unavailable */ }
 }
@@ -42,10 +42,14 @@ function killStaleEdgeAppWindows() {
 function openUi(url, settings) {
   const edge = findBrowser(settings.get('browserPath'));
   if (edge) {
-    // Kill stale app-mode window for this origin first so Edge opens fresh at the new URL.
-    killStaleEdgeAppWindows();
-    // app-mode window = looks like a desktop app, separate from normal browsing
-    spawn(edge, [`--app=${url}`, '--window-size=1400,900'], { detached: true, stdio: 'ignore' }).unref();
+    // The manager's window lives in its own Edge profile: a stale one is killed by profile, and the user's own
+    // Edge windows are never touched.
+    const profile = path.join(DATA, 'edge-app');
+    killStaleEdgeAppWindows(profile);
+    spawn(edge, [`--user-data-dir=${profile}`, `--app=${url}`, '--window-size=1400,900', '--no-first-run', '--no-default-browser-check'], { detached: true, stdio: 'ignore' }).unref();
+    // Edge app windows keep the light caption; paint it black once the window exists (Windows only, best effort).
+    const tb = path.join(ROOT, 'src', 'titlebar.ps1');
+    if (fs.existsSync(tb)) spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-File', tb], { stdio: 'ignore', windowsHide: true }).unref();
   } else {
     spawn('rundll32.exe', ['url.dll,FileProtocolHandler', url], { detached: true, stdio: 'ignore' }).unref();
   }

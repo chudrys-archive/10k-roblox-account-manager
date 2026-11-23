@@ -568,6 +568,24 @@ class Launcher extends EventEmitter {
   }
 
   /** Queue a launch. Launches run one at a time so process<->account mapping is unambiguous. */
+  /**
+   * Hard limit: one Roblox client at a time, whatever started it. Two clients signed in at once is what gets
+   * accounts moderated, so this never lets a second client start. A client that is closing gets a short wait;
+   * if one is still running after that, the launch is refused. If the process list can't be read, it is refused too.
+   */
+  async assertNoOtherClient() {
+    const deadline = Date.now() + (this.clientWaitMs ?? 15000);
+    for (;;) {
+      const running = await this.helper.procs().catch(() => null);
+      if (running === null) throw new Error('Could not read the running Roblox processes, so this launch was not started.');
+      if (running.length === 0) return;
+      if (Date.now() >= deadline) {
+        throw new Error(`Another Roblox client is still running (${running.length}). The manager allows one client at a time, so close it first.`);
+      }
+      await sleep(500);
+    }
+  }
+
   launch(accountId, target, reason = 'manual', opts = {}) {
     if (this.pending.has(accountId)) return this.pending.get(accountId);
     if (['manual', 'rejoin', 'restart', 'hop'].includes(reason)) this.holds.delete(accountId); // only a person asking lifts a stop/cancel hold
@@ -663,6 +681,7 @@ class Launcher extends EventEmitter {
       if (rbx.testBuild) setUpdatersBlocked(true, [{ dir: path.dirname(rbx.path) }]);
     }
 
+    await this.assertNoOtherClient();
     // Read the process list before minting the ticket, not between minting and launching: a slow helper
     // call in between would leave the ticket stale by the time the client redeems it.
     const before = new Set((await this.helper.procs()).map((p) => p.pid));

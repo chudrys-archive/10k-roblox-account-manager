@@ -255,6 +255,31 @@ class Server {
       return { started: entries.length };
     });
 
+    // Check window: log into one account in a separate window and see whether it is banned. Nothing is added to the
+    // list. One check (or other login window) at a time.
+    let checkOpen = false;
+    this.route('POST', '/ui/accounts/check-login', () => {
+      if (checkOpen || c.browser.list().some((b) => b.kind === 'login')) return { started: false, busy: true };
+      checkOpen = true;
+      (async () => {
+        try {
+          this.toast('info', 'Check window opened. Log in there and the result shows here. Nothing is added to your list.');
+          const cookie = await c.browser.login({ timeoutMin: 10 });
+          const [row] = await c.accounts.checkCookies(cookie);
+          if (!row || !row.valid) this.toast('error', `Check failed: ${row?.error || 'no session'}`);
+          else {
+            const where = row.known ? 'already in your list' : 'not in your list';
+            if (row.status === 'banned') this.toast('error', `${row.username} is BANNED (${where})`);
+            else if (row.status === 'restricted') this.toast('error', `${row.username} is restricted (${where})`);
+            else if (row.status === 'needs verification') this.toast('error', `${row.username} needs verification (${where})`);
+            else this.toast('ok', `${row.username} is not banned (${where})`);
+          }
+        } catch (e) {
+          this.toast('error', `Check window: ${e.message}`);
+        } finally { checkOpen = false; }
+      })();
+      return { started: true };
+    });
     this.route('POST', '/ui/accounts/:id/update', ({ params, body }) => c.accounts.publicView(c.accounts.update(acc(params.id).id, body)));
     this.route('POST', '/ui/accounts/delete', ({ body }) => {
       const list = ids(body);

@@ -51,12 +51,13 @@ function findBrowser(override) {
   const pf = process.env.ProgramFiles || 'C:\\Program Files';
   const pf86 = process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)';
   const la = process.env.LOCALAPPDATA || '';
+  // Chrome first: the manager window and the check / login windows run on it. Edge and Brave are fallbacks.
   const cands = [
-    path.join(pf86, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
-    path.join(pf, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
     path.join(pf, 'Google', 'Chrome', 'Application', 'chrome.exe'),
     path.join(pf86, 'Google', 'Chrome', 'Application', 'chrome.exe'),
     path.join(la, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+    path.join(pf86, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+    path.join(pf, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
     path.join(pf, 'BraveSoftware', 'Brave-Browser', 'Application', 'brave.exe'),
   ];
   return cands.find((c) => fs.existsSync(c)) || null;

@@ -223,8 +223,8 @@ function connect() {
 }
 call('/ui/logs').then((l) => logs.push(...l)).catch(() => {});
 connect();
-setInterval(() => { if (S && !S.locked) { renderStats(); renderAfk(); } }, 1000);
-setInterval(() => { if (S && !S.locked) renderTable(); }, 10000);
+setInterval(() => { if (S && !S.locked && !document.hidden) { renderStats(); renderAfk(); } }, 1000);
+setInterval(() => { if (S && !S.locked && !document.hidden) renderTable(); }, 10000);
 
 function render() {
   $('#lock').classList.toggle('hidden', !S.locked);
@@ -266,12 +266,20 @@ function renderNav() {
 
 function renderSide() {
   const m = S.launcher.multi;
-  const multi = !m || !m.wanted ? ['', 'Multi-instance off'] : m.mutex === 'held' ? ['ok', 'Multi-instance active'] : ['warn', 'Multi-instance waiting'];
+  const multi = ['ok', 'One client at a time'];
   const wd = S.settings.watchdog.enabled;
   $('#side-status').innerHTML = `
     <div class="row" title="${esc(m && m.mutex !== 'held' && m.wanted ? 'A Roblox client started outside the manager owns the lock. Close all Roblox windows once.' : '')}"><span class="dot ${multi[0]}"></span>${multi[1]}</div>
-    <div class="row"><span class="dot ${S.roblox ? 'ok' : 'err'}"></span>${S.roblox ? 'Roblox detected' : 'Roblox not found'}</div>
+    <div class="row"><span class="dot ${S.roblox ? 'ok' : 'err'}"></span>${S.roblox ? 'Roblox installed' : 'Roblox not found'}</div>
     <div class="row"><span class="dot ${wd ? 'ok' : ''}"></span>Watchdog ${wd ? 'on' : 'paused'}</div>`;
+}
+
+// Skip innerHTML when the markup did not change, so rows keep hover, focus and selection across the 1 s / 10 s refresh.
+const htmlCache = new Map();
+function setHtml(sel, html) {
+  if (htmlCache.get(sel) === html) return;
+  htmlCache.set(sel, html);
+  document.querySelector(sel).innerHTML = html;
 }
 
 function renderStats() {
@@ -299,7 +307,8 @@ function renderStats() {
   const t = `${inst.length ? `(${inst.length}) ` : ''}Isa's Roblox Account Manager`;
   if (document.title !== t) document.title = t;
   renderQueueBanner();
-  $('#stats').innerHTML = cards.map(([ic, l, v, h]) => `<div class="stat"><div class="label">${icon(ic)}${l}</div><div class="val">${v}</div><div class="hint">${h}</div></div>`).join('');
+  $('#btn-check-ban').disabled = (S.browsers || []).some((b) => b.kind === 'login');
+  setHtml('#stats', cards.map(([ic, l, v, h]) => `<div class="stat"><div class="label">${icon(ic)}${l}</div><div class="val">${v}</div><div class="hint">${h}</div></div>`).join(''));
 }
 
 // ============================================================ accounts table
@@ -390,9 +399,9 @@ function renderTable() {
         <button class="btn icon sm" data-row="menu" title="More">${icon('more')}</button></div></td>
     </tr>`;
   }).join('');
-  $('#acc-table tbody').innerHTML = rows || (S.accounts.length
+  setHtml('#acc-table tbody', rows || (S.accounts.length
     ? '<tr><td colspan="8"><div class="empty">No accounts match this filter.</div></td></tr>'
-    : `<tr><td colspan="8"><div class="empty"><b>No accounts yet</b>Click <b style="display:inline">Add account</b> to log in through a browser window or import cookies.</div></td></tr>`);
+    : `<tr><td colspan="8"><div class="empty"><b>No accounts yet</b>Click <b style="display:inline">Add account</b> to log in through a browser window or import cookies.</div></td></tr>`));
   $('#sel-all').checked = list.length > 0 && list.every((a) => selected.has(a.id));
   store.set('selected', [...selected]);
 }
@@ -663,6 +672,10 @@ bind($('#btn-ka-on'), () => ACT.keepAlive(needSel(), true));
 bind($('#btn-ka-off'), () => ACT.keepAlive(needSel(), false));
 bind($('#btn-validate'), () => ACT.validate(selIds()));
 // Cookie checker: validate cookies without adding them
+bind($('#btn-check-ban'), async () => {
+  const r = await call('/ui/accounts/check-login', {});
+  if (r && r.busy) toast('info', 'A check or login window is already open. Finish or close it first.');
+});
 bind($('#btn-check'), async () => {
   const d = openDialog(`<h2>Check cookies</h2><p class="lead">Paste cookies (one per line, any format that contains a .ROBLOSECURITY value). Nothing is saved unless you click Import.</p>
     <textarea id="cc-text" rows="6" placeholder="_|WARNING:-DO-NOT-SHARE-THIS..."></textarea><div id="cc-res"></div>
@@ -1002,7 +1015,6 @@ function openCaptchaTest() {
 let settingsDirty = false;
 const SETTINGS = [
   ['Launching', 'play', [
-    ['multiInstance', 'bool', 'Multi-instance', 'Run many Roblox clients at once'],
     ['launchDelaySec', 'num', 'Delay between launches (seconds)', 'Roblox throttles rapid joins; 5–10 s is safest'],
     ['launchTimeoutSec', 'num', 'Wait for client to start (seconds)'],
     ['onAlreadyRunning', [['replace', 'Close the old client first'], ['skip', 'Skip that account'], ['allow', 'Allow a second client']], 'If an account is already running', 'Roblox kicks duplicate sessions, so "close old" is recommended'],
@@ -1083,7 +1095,6 @@ const SETTINGS = [
 // Only the ones the code actually acts on are listed; none of them is proven to be the cause of the main PC problem.
 const RISK = {
   neverUpdateRoblox: 'Suspected cause: every 20 s it force-closes Roblox updater processes and renames updater files in Roblox version folders. Turn it off first if the PC keeps closing things.',
-  multiInstance: 'Can cause strain: many clients at once use more GPU, RAM and CPU. Suspected of contributing on the main PC.',
   onAlreadyRunning: 'Can cause closes: "Close the old client first" force-closes the running client, and any executor attached to it closes with it.',
   clientPriority: 'Can cause freezes: a lower CPU priority can starve Roblox and any executor attached to it. Suspected of contributing.',
   trimMemoryMin: 'Can cause crashes: emptying a client memory can break injected executors and makes Roblox page memory back in. Suspected of contributing; keep at 0.',
@@ -1122,7 +1133,7 @@ function renderSettings() {
       <div class="btn-row"><button class="btn" type="button" id="btn-mp">${S.vaultMode === 'scrypt' ? 'Change / remove password' : 'Set master password'}</button></div>
     </div>
     <div class="card"><h3>${icon('power')}App</h3>
-      <p class="small muted" style="margin-top:0">"Start Manager.vbs" (or the desktop shortcut) runs the manager without a console window. Quitting never closes your Roblox clients; multi-instance stays protected until they are all closed.</p>
+      <p class="small muted" style="margin-top:0">"Start Manager.vbs" (or the desktop shortcut) runs the manager without a console window. Quitting never closes your Roblox clients. Only one Roblox client runs at a time, so two accounts are never signed in together.</p>
       <div class="btn-row"><button class="btn" type="button" id="btn-shortcut">Create desktop shortcut</button><button class="btn" type="button" id="btn-test-alert">${icon('bell')}Send test alert</button><button class="btn" type="button" id="btn-captcha-test">CAPTCHA simulator</button></div>
     </div>
     <div class="card"><h3>${icon('server')}API reference</h3><div class="small muted">Base: <span class="mono">${esc(S.apiUrl)}</span><br>
