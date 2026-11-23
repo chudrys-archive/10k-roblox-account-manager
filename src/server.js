@@ -376,9 +376,9 @@ class Server {
       for (const id of list) c.accounts.update(id, { keepAlive: { enabled: false } });
     });
     this.route('POST', '/ui/kill', async ({ body }) => {
-      if (body.all) { c.launcher.cancelQueued(null); return { killed: await c.launcher.killAll(true) }; }
+      if (body.all) { c.launcher.stopAccounts(null); return { killed: await c.launcher.killAll(true) }; }
       const list = ids(body);
-      if (body.stopKeepAlive !== false) c.launcher.cancelQueued(list); // Stop also cancels launches still waiting
+      if (body.stopKeepAlive !== false) c.launcher.stopAccounts(list); // Stop also cancels waiting launches and blocks automatic relaunch
       if (body.stopKeepAlive !== false) for (const id of list) if (c.accounts.get(id).keepAlive.enabled) c.accounts.update(id, { keepAlive: { enabled: false } });
       const pids = [...list.flatMap((id) => c.launcher.byAccount(id).map((i) => i.pid)), ...(body.pids || [])];
       return { killed: await c.launcher.kill(pids, body.stopKeepAlive === false ? 'restart' : 'manual') };

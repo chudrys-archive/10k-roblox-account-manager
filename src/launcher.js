@@ -559,7 +559,7 @@ class Launcher extends EventEmitter {
   /** Queue a launch. Launches run one at a time so process<->account mapping is unambiguous. */
   launch(accountId, target, reason = 'manual', opts = {}) {
     if (this.pending.has(accountId)) return this.pending.get(accountId);
-    if (reason !== 'keep-alive') this.holds.delete(accountId); // a person asking for a launch lifts a cancel hold
+    if (['manual', 'rejoin', 'restart', 'hop'].includes(reason)) this.holds.delete(accountId); // only a person asking lifts a stop/cancel hold
     const job = { accountId, cancelled: false, started: false };
     this.jobs.set(accountId, job);
     this.queued.push(accountId);
@@ -597,6 +597,13 @@ class Launcher extends EventEmitter {
       this.emit('change');
     }
     return n;
+  }
+
+  /** Stop: cancel waiting launches and keep these accounts from being relaunched automatically for 10 min. ids = null means all. */
+  stopAccounts(ids = null) {
+    const list = ids || this.accounts.list.map((a) => a.id);
+    for (const id of list) this.holds.set(id, Date.now() + 10 * 60000);
+    return this.cancelQueued(ids);
   }
 
   /** True while keep-alive relaunches of this account are paused by a cancel. */
@@ -853,11 +860,13 @@ class Launcher extends EventEmitter {
   async retryAuth(inst) {
     if (inst.authHandled) return;
     inst.authHandled = true;
+    // the person stopped this client (or stopped the account): a late 403 from it must not relaunch it
+    if (inst.killReason || this.isHeld(inst.accountId)) return;
     const acc = this.accounts.get(inst.accountId);
     if (!acc) return;
     this.authRetries = this.authRetries || new Map();
     const recent = (this.authRetries.get(acc.id) || []).filter((t) => Date.now() - t < 600000);
-    if (recent.length >= 3) {
+    if (recent.length >= 2) {
       this.authRetries.set(acc.id, recent);
       log.error(acc.username + ': Roblox keeps refusing this sign-in (403) after ' + recent.length + ' fresh tickets. Not retrying. Check the account (Validate, or log in again).');
       this.emit('change');
@@ -865,9 +874,10 @@ class Launcher extends EventEmitter {
     }
     recent.push(Date.now());
     this.authRetries.set(acc.id, recent);
-    log.warn(acc.username + ': Roblox refused the sign-in ticket (403). Relaunching with a fresh ticket (' + recent.length + '/3).');
+    log.warn(acc.username + ': Roblox refused the sign-in ticket (403). Relaunching with a fresh ticket (' + recent.length + '/2).');
     await this.kill([inst.pid], 'sign-in refused');
-    await sleep(this.authRetryDelayMs ?? (3000 + Math.random() * 2000));
+    await sleep(this.authRetryDelayMs ?? (recent.length === 1 ? 10000 : 30000));
+    if (this.isHeld(acc.id)) { log.info(acc.username + ': stopped while waiting to retry the sign-in; not relaunching'); return; }
     await this.launch(acc.id, inst.target || this.currentTarget(acc), 'sign-in retry', { replace: true })
       .catch((e) => log.error(acc.username + ': sign-in retry failed: ' + e.message));
   }
