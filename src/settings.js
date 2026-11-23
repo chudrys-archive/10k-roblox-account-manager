@@ -15,7 +15,7 @@ const DEFAULTS = {
   presencePollSec: 30,         // live presence for all accounts; 0 = off
 
   // launching
-  multiInstance: false,        // never on: the manager runs one Roblox client at a time (one-client guard in launcher.js)
+  multiInstance: false,        // off by default: one Roblox client at a time (guard in launcher.js)
   launchDelaySec: 6,           // gap between consecutive launches (Roblox rate-limits rapid joins)
   launchTimeoutSec: 90,        // how long to wait for the Roblox process to appear
   onAlreadyRunning: 'skip',    // 'replace' | 'skip' | 'allow'. 'replace' closes the running client (and any executor in it)
@@ -99,7 +99,6 @@ class Settings extends EventEmitter {
     super();
     const saved = readJson(FILE, {});
     this.data = deepMerge(DEFAULTS, saved);
-    this.data.multiInstance = false; // a saved "true" from an older version must not hold the Roblox multi-instance lock
     if ((saved.settingsVersion || 0) < SETTINGS_VERSION) {
       // one-time: installs saved before the safe defaults move onto them. Accounts, alerts and the
       // other preferences are kept; only settings that can close clients or upset the display change.
@@ -114,7 +113,6 @@ class Settings extends EventEmitter {
   get(k) { return k ? this.data[k] : this.data; }
   update(patch) {
     const next = deepMerge(this.data, patch || {});
-    next.multiInstance = false;
     // sanitize numeric fields
     const num = (v, d, min, max) => { const n = Number(v); return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : d; };
     next.port = num(next.port, 7963, 1024, 65535);

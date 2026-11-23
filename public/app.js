@@ -266,7 +266,7 @@ function renderNav() {
 
 function renderSide() {
   const m = S.launcher.multi;
-  const multi = ['ok', 'One client at a time'];
+  const multi = S.settings.multiInstance ? ['ok', 'Multiple clients allowed'] : ['ok', 'One client at a time'];
   const wd = S.settings.watchdog.enabled;
   $('#side-status').innerHTML = `
     <div class="row" title="${esc(m && m.mutex !== 'held' && m.wanted ? 'A Roblox client started outside the manager owns the lock. Close all Roblox windows once.' : '')}"><span class="dot ${multi[0]}"></span>${multi[1]}</div>
@@ -1063,6 +1063,7 @@ const SETTINGS = [
   ['Launching', 'play', [
     ['launchDelaySec', 'num', 'Delay between launches (seconds)', 'Roblox throttles rapid joins; 5–10 s is safest'],
     ['launchTimeoutSec', 'num', 'Wait for client to start (seconds)'],
+    ['multiInstance', 'bool', 'Allow more than one Roblox client', 'Off: one client at a time (the safe default). On: the manager holds the Roblox lock so clients can run side by side. Untested on current builds; turn it off if clients close unexpectedly.'],
     ['onAlreadyRunning', [['replace', 'Close the old client first'], ['skip', 'Skip that account'], ['allow', 'Allow a second client']], 'If an account is already running', 'Roblox kicks duplicate sessions, so "close old" is recommended'],
     ['robloxPath', 'text', 'Roblox executable', 'Leave blank to auto-detect (also works with Bloxstrap/Fishstrap)'],
     ['testClientPath', 'text', 'Test Roblox executable', 'Enter the full path to an older RobloxPlayerBeta.exe to use it for launches and retries. Roblox may still request an update. Clear this field to return to normal launching.'],
