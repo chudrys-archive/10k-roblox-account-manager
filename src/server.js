@@ -280,6 +280,23 @@ class Server {
       return { started: entries.length };
     });
 
+    // Create account: opens the Roblox sign-up page in your own Chrome. You fill the form there. When Roblox logs the
+    // new account in, the capture adds it to the list the same way a login does. One window at a time.
+    this.route('POST', '/ui/accounts/signup', async ({ body }) => {
+      if (c.capture.armed() || c.browser.list().some((b) => b.kind === 'login')) return { started: false, busy: true };
+      (async () => {
+        try {
+          this.toast('info', 'Chrome opened the Roblox sign-up page. Create the account there and it is added automatically.');
+          const cookie = await c.browser.login({ label: 'new account', url: 'https://www.roblox.com/signup' });
+          const { account } = await c.accounts.addCookie(cookie, { group: body.group || undefined });
+          this.toast('ok', `Created and added ${account.username}`);
+        } catch (e) {
+          this.toast('error', `Create account: ${e.message}`);
+        }
+      })();
+      return { started: true };
+    });
+
     // Check window: log into one account in a separate window and see whether it is banned. Nothing is added to the
     // list. One check (or other login window) at a time.
     let checkOpen = false;

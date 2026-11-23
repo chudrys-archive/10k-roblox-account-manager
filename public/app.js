@@ -696,6 +696,10 @@ bind($('#btn-check-ban'), async () => {
   const r = await call('/ui/accounts/check-login', {});
   if (r && r.busy) toast('info', 'A check or login window is already open. Finish or close it first.');
 });
+bind($('#btn-signup'), async () => {
+  const r = await call('/ui/accounts/signup', {});
+  if (r && r.busy) toast('info', 'A check or login window is already open. Finish or close it first.');
+});
 bind($('#btn-check'), async () => {
   const d = openDialog(`<h2>Check cookies</h2><p class="lead">Paste cookies (one per line, any format that contains a .ROBLOSECURITY value). Nothing is saved unless you click Import.</p>
     <textarea id="cc-text" rows="6" placeholder="_|WARNING:-DO-NOT-SHARE-THIS..."></textarea><div id="cc-res"></div>
