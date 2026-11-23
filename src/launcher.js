@@ -357,11 +357,12 @@ class Launcher extends EventEmitter {
     } catch (e) { log.warn('persist failed: ' + e.message); }
   }
 
-  isTombstoned(pid) {
-    const t = this.tombstones.get(pid);
+  /** Ignore a process we killed for 120s, but only that process: Windows can hand its pid to a new one. */
+  isTombstoned(p) {
+    const t = this.tombstones.get(p.pid);
     if (!t) return false;
-    if (Date.now() - t > 120000) { this.tombstones.delete(pid); return false; } // pids get reused by Windows eventually
-    return true;
+    if (Date.now() - t.at > 120000) { this.tombstones.delete(p.pid); return false; }
+    return !(t.start && p.start && t.start !== p.start);
   }
 
   byAccount(accountId) { return [...this.instances.values()].filter((i) => i.accountId === accountId); }
@@ -393,7 +394,7 @@ class Launcher extends EventEmitter {
         if (!p || (inst.btid && p.btid && p.btid !== inst.btid)) {
           // Roblox's starter process often relaunches itself (new PID, same launch args).
           // Hand the instance over silently instead of reporting a crash.
-          const heir = inst.btid && !inst.killReason && procs.find((q) => q.btid === inst.btid && q.pid !== pid && !this.instances.has(q.pid) && !this.isTombstoned(q.pid));
+          const heir = inst.btid && !inst.killReason && procs.find((q) => q.btid === inst.btid && q.pid !== pid && !this.instances.has(q.pid) && !this.isTombstoned(q));
           if (heir) {
             this.instances.delete(pid);
             inst.pid = heir.pid;
@@ -422,7 +423,7 @@ class Launcher extends EventEmitter {
       const trackedTags = new Set([...this.instances.values()].map((i) => i.btid).filter(Boolean));
       const byTag = new Map();
       for (const p of procs) {
-        if (this.instances.has(p.pid) || !p.btid || trackedTags.has(p.btid) || this.isTombstoned(p.pid)) continue;
+        if (this.instances.has(p.pid) || !p.btid || trackedTags.has(p.btid) || this.isTombstoned(p)) continue;
         const prev = byTag.get(p.btid);
         if (!prev || Date.parse(p.start || 0) > Date.parse(prev.start || 0)) byTag.set(p.btid, p); // newest = real client
       }
@@ -611,12 +612,12 @@ class Launcher extends EventEmitter {
     while (Date.now() < deadline) {
       await sleep(1000);
       const procs = await this.helper.procs().catch(() => []);
-      const tagged = procs.filter((p) => p.btid === btid && !this.isTombstoned(p.pid));
+      const tagged = procs.filter((p) => p.btid === btid && !this.isTombstoned(p));
       found = tagged.sort((a, b) => Date.parse(b.start || 0) - Date.parse(a.start || 0))[0];
       // Untagged process (command line unreadable): accept it only when it is unambiguous -
       // exactly one new untagged Roblox process and no other launch still waiting to be matched.
       if (!found) {
-        const untagged = procs.filter((p) => !p.btid && !before.has(p.pid) && !this.instances.has(p.pid) && !this.isTombstoned(p.pid));
+        const untagged = procs.filter((p) => !p.btid && !before.has(p.pid) && !this.instances.has(p.pid) && !this.isTombstoned(p));
         const otherWaiting = [...this.btids.entries()].some(([t, v]) => t !== btid && Date.now() - v.at < 180000 && ![...this.instances.values()].some((i) => i.btid === t));
         if (untagged.length === 1 && !otherWaiting) found = untagged[0];
       }
@@ -759,9 +760,23 @@ class Launcher extends EventEmitter {
   async kill(pids, why = 'manual') {
     pids = [].concat(pids).filter(Boolean).map(Number);
     if (!pids.length) return 0;
-    for (const pid of pids) this.tombstones.set(pid, Date.now());
+    // One launch tag can cover more than one process (Roblox's starter + real client). Take the whole
+    // tag down, or the survivor is adopted again on the next sync as a second instance of the same account.
+    const procs = await this.helper.procs().catch(() => []);
+    const tags = new Set(pids.map((pid) => this.instances.get(pid)?.btid).filter(Boolean));
+    for (const p of procs) if (p.btid && tags.has(p.btid) && !pids.includes(p.pid)) pids.push(p.pid);
+    const startOf = new Map(procs.map((p) => [p.pid, p.start || null]));
+    for (const pid of pids) this.tombstones.set(pid, { at: Date.now(), start: startOf.get(pid) ?? null });
     const n = await this.helper.call('kill', { pids });
+    // Forget only the processes that are really gone. A failed kill must not hide a live client.
+    let alive = new Set();
+    for (let i = 0; i < 8; i++) {
+      alive = new Set((await this.helper.procs().catch(() => [])).map((p) => p.pid));
+      if (!pids.some((pid) => alive.has(pid))) break;
+      await sleep(250);
+    }
     for (const pid of pids) {
+      if (alive.has(pid)) continue;
       const inst = this.instances.get(pid);
       if (inst) { this.instances.delete(pid); inst.killReason = why; this.emit('exit', inst); }
     }
