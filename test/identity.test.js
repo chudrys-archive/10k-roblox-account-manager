@@ -12,7 +12,7 @@ const { Watchdog } = require('../src/watchdog');
 const { LogWatcher } = require('../src/logwatch');
 const { DEFAULTS } = require('../src/settings');
 
-function setup(n = 3) {
+function setup(n = 3, { killRemoves = false } = {}) {
   const settings = new EventEmitter();
   const cfg = { ...DEFAULTS, multiInstance: false, renameWindows: false };
   settings.get = (k) => (k ? cfg[k] : cfg);
@@ -23,7 +23,14 @@ function setup(n = 3) {
   const killed = [];
   const helper = {
     procs: async () => procs,
-    call: async (cmd, a) => { if (cmd === 'kill') { killed.push(...a.pids); return a.pids.length; } return 0; },
+    call: async (cmd, a) => {
+      if (cmd === 'kill') {
+        killed.push(...a.pids);
+        if (killRemoves) procs = procs.filter((p) => !a.pids.includes(p.pid)); // the process really exits
+        return a.pids.length;
+      }
+      return 0;
+    },
   };
   const launcher = new Launcher({ helper, settings, accounts });
   return { launcher, accounts, list, setProcs: (p) => { procs = p; }, killed, settings };
@@ -75,16 +82,28 @@ test('starter + real client sharing one tag become ONE instance, and the hand-of
 });
 
 test('a killed process is never re-adopted while it is shutting down', async () => {
-  const { launcher, setProcs, killed } = setup(1);
+  const { launcher, setProcs, killed } = setup(1, { killRemoves: true });
   launcher.btids.set('T1', { accountId: 'acc0', at: Date.now() });
-  setProcs([P(20, 'T1')]);
+  const dying = P(20, 'T1'); // same process object (same start time) throughout: pid reuse would differ
+  setProcs([dying]);
   await launcher.sync();
   assert.ok(launcher.instances.has(20));
   await launcher.kill([20], 'test');
   assert.deepEqual(killed, [20]);
-  // process still visible for a moment after the kill
+  assert.equal(launcher.instances.size, 0);
+  // the dying process is still listed for a moment after the kill
+  setProcs([dying]);
   await launcher.sync();
   assert.equal(launcher.instances.size, 0, 'dying pid must not be adopted again');
+});
+
+test('a kill that leaves the process alive keeps the instance (failed kill never hides a live client)', async () => {
+  const { launcher, setProcs } = setup(1);
+  launcher.btids.set('T1', { accountId: 'acc0', at: Date.now() });
+  setProcs([P(20, 'T1')]);
+  await launcher.sync();
+  await launcher.kill([20], 'test');
+  assert.ok(launcher.instances.has(20), 'live client must stay tracked');
 });
 
 test('a process with an unknown tag is never assigned to any account', async () => {

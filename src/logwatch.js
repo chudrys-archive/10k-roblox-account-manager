@@ -38,6 +38,7 @@ class LogWatcher extends EventEmitter {
     this.dir = dir;
     this.claimed = new Set(); // log files already tied to an instance
     this.files = new Map();   // pid -> {file, offset, rest}
+    this.headCache = new Map(); // full path -> first 96KB of a recent log (only kept while non-empty)
     this.side = new Map();    // full path -> {btid, file, offset, rest}: the second log of a launch (starter + client)
     this.on('authfail', (inst) => {
       if (this.launcher && typeof this.launcher.retryAuth === 'function') {
@@ -76,18 +77,22 @@ class LogWatcher extends EventEmitter {
       if (this.claimed.has(full)) continue;
       try { const st = fs.statSync(full); cands.push({ full, mtime: st.mtimeMs, birth: st.birthtimeMs }); } catch {}
     }
+    for (const k of [...this.headCache.keys()]) if (!cands.some((c) => c.full === k)) this.headCache.delete(k);
     for (const inst of insts) {
       const since = (inst.startedAt || 0) - 120000;
       for (const c of cands) {
         if (this.claimed.has(c.full) || c.mtime < since) continue;
-        let head = '';
-        try {
+        // the header is written once at launch: read each recent log's head once, not every 2s tick
+        let head = this.headCache.get(c.full) || '';
+        if (!head) try {
           const fd = fs.openSync(c.full, 'r');
           const buf = Buffer.alloc(96 * 1024);
           const n = fs.readSync(fd, buf, 0, buf.length, 0);
           fs.closeSync(fd);
           head = buf.toString('utf8', 0, n);
         } catch { continue; }
+        // cache only once the header is surely flushed; a partial first read must not hide the tracker id forever
+        if (head.length >= 4096 || head.includes('suggestedBrowserTrackerId=')) this.headCache.set(c.full, head);
         if (!head.includes(`suggestedBrowserTrackerId=${inst.btid}`)) continue;
         this.claimed.add(c.full);
         if (this.files.has(inst.pid)) {

@@ -1063,6 +1063,23 @@ const SETTINGS = [
     ['api.allowCookieExport', 'bool', 'Allow /api/cookie', 'Dangerous: any program that knows the password can read cookies'],
   ]],
 ];
+// Settings that can close clients, freeze Roblox or upset the display. Shown next to the setting.
+// Only the ones the code actually acts on are listed; none of them is proven to be the cause of the main PC problem.
+const RISK = {
+  neverUpdateRoblox: 'Suspected cause: every 20 s it force-closes Roblox updater processes and renames updater files in Roblox version folders. Turn it off first if the PC keeps closing things.',
+  multiInstance: 'Can cause strain: many clients at once use more GPU, RAM and CPU. Suspected of contributing on the main PC.',
+  onAlreadyRunning: 'Can cause closes: "Close the old client first" force-closes the running client, and any executor attached to it closes with it.',
+  clientPriority: 'Can cause freezes: a lower CPU priority can starve Roblox and any executor attached to it. Suspected of contributing.',
+  trimMemoryMin: 'Can cause crashes: emptying a client memory can break injected executors and makes Roblox page memory back in. Suspected of contributing; keep at 0.',
+  'antiAfk.enabled': 'Can take over input: it briefly focuses each Roblox window and sends a key or click. If focus slips, the input can land in another app. Suspected of contributing.',
+  'antiAfk.action': 'Right-click and custom keys send input to the focused Roblox window. Suspected of contributing.',
+  'antiAfk.includeUntracked': 'Also focuses Roblox windows the manager did not start. Suspected of contributing.',
+  'watchdog.killHungAfterSec': 'Can cause closes: force-kills clients it thinks are frozen, which also closes any executor attached to them. Suspected of causing the close-outs.',
+  'watchdog.restartEveryMin': 'Can cause closes: force-restarts clients on a timer, closing any executor attached to them. Suspected of contributing.',
+  fastProfile: 'Can cause display problems: changes Roblox render and GPU settings. Suspected of contributing to the monitor blinking; try Off.',
+  fpsCap: 'Changes Roblox frame limits. Suspected of contributing to display problems; try 0.',
+  customFFlags: 'Can cause crashes or display problems: every flag you add changes Roblox behavior directly. Suspected of contributing; leave empty.',
+};
 const getPath = (o, p) => p.split('.').reduce((x, k) => (x == null ? x : x[k]), o);
 const setPath = (o, p, v) => { const ks = p.split('.'); let x = o; ks.slice(0, -1).forEach((k) => { x = x[k] = x[k] || {}; }); x[ks.at(-1)] = v; };
 
@@ -1072,13 +1089,14 @@ function renderSettings() {
   const field = ([key, type, label, hint]) => {
     const v = getPath(st, key);
     const h = hint ? `<div class="hint">${esc(hint)}</div>` : '';
-    if (type === 'bool') return `<div class="toggle-row"><label class="switch"><input type="checkbox" name="${key}" ${v ? 'checked' : ''}><span></span></label><div class="txt">${esc(label)}${hint ? `<small>${esc(hint)}</small>` : ''}</div></div>`;
+    const r = RISK[key] ? `<div class="risk">${esc(RISK[key])}</div>` : '';
+    if (type === 'bool') return `<div class="toggle-row"><label class="switch"><input type="checkbox" name="${key}" ${v ? 'checked' : ''}><span></span></label><div class="txt">${esc(label)}${hint ? `<small>${esc(hint)}</small>` : ''}</div></div>${r}`;
     let input;
     if (Array.isArray(type)) input = `<select name="${key}">${type.map(([val, txt]) => `<option value="${val}" ${val === v ? 'selected' : ''}>${esc(txt)}</option>`).join('')}</select>`;
     else if (type === 'textarea') input = `<textarea name="${key}" style="min-height:70px">${esc(v)}</textarea>`;
     else if (type === 'password') input = `<input type="password" name="${key}" placeholder="${st.api.passwordSet ? '•••••••• (set)' : 'not set'}" autocomplete="new-password">`;
     else input = `<input name="${key}" type="${type === 'num' ? 'number' : 'text'}" value="${esc(v)}">`;
-    return `<label class="f">${esc(label)}</label>${input}${h}`;
+    return `<label class="f">${esc(label)}</label>${input}${h}${r}`;
   };
   $('#settings-form').innerHTML = `<div class="settings-grid">${SETTINGS.map(([title, ic, items]) => `<div class="card"><h3>${icon(ic)}${esc(title)}</h3>${items.map(field).join('')}</div>`).join('')}
     <div class="card"><h3>${icon('lock')}Vault security</h3>

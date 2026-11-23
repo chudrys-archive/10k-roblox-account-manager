@@ -91,7 +91,15 @@ function launchUri(ticket, plUrl, btid) {
 }
 
 // ---------------- Roblox install detection ----------------
+const regDefaultCache = new Map();
 function regDefault(key) {
+  const hit = regDefaultCache.get(key);
+  if (hit && Date.now() - hit.at < 60000) return hit.value;
+  const value = regDefaultUncached(key);
+  regDefaultCache.set(key, { at: Date.now(), value });
+  return value;
+}
+function regDefaultUncached(key) {
   try {
     const out = execFileSync('reg', ['query', key, '/ve'], { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
     const m = out.match(/REG_(?:EXPAND_)?SZ\s+(.*)/);
@@ -103,7 +111,14 @@ function regDefault(key) {
 }
 
 /** The RobloxPlayerBeta.exe Roblox's installer registered as the installed client, or null. */
+// Registry lookups run `reg.exe` synchronously; cache them so each launch doesn't block the event loop.
+let regClientCache = { at: 0, value: null };
 function registeredClientExe() {
+  if (Date.now() - regClientCache.at < 60000) return regClientCache.value;
+  regClientCache = { at: Date.now(), value: registeredClientExeUncached() };
+  return regClientCache.value;
+}
+function registeredClientExeUncached() {
   try {
     const out = execFileSync('reg', ['query', 'HKCU\\Software\\ROBLOX Corporation\\Environments\\roblox-player', '/v', 'clientExe'],
       { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
@@ -381,8 +396,14 @@ class Launcher extends EventEmitter {
     if (this.syncing) return;
     this.syncing = true;
     try {
-      await this.applyMulti().catch((e) => log.debug('applyMulti: ' + e.message));
-      if (this.settings.get('neverUpdateRoblox')) {
+      // do not block the sync on lock-holder startup (can take ~10s); the launch path awaits it itself
+      if (!this.multiBusy) {
+        this.multiBusy = true;
+        this.applyMulti().catch((e) => log.debug('applyMulti: ' + e.message)).finally(() => { this.multiBusy = false; });
+      }
+      // taskkill is a process spawn: sweep for updaters every 20s, not on every 3s sync
+      if (this.settings.get('neverUpdateRoblox') && Date.now() - (this.lastUpdaterSweep || 0) > 20000) {
+        this.lastUpdaterSweep = Date.now();
         const n = await killUpdaters();
         if (n) log.warn(`closed ${n} Roblox updater process(es) ("Don't update Roblox" is on)`);
       }
@@ -566,8 +587,7 @@ class Launcher extends EventEmitter {
     if (!rbx) throw new Error('Roblox is not installed (could not find RobloxPlayerBeta / roblox-player handler)');
     if (existing.length && mode === 'replace') {
       log.info(`${name} already running; closing old client first`);
-      await this.kill(existing.map((i) => i.pid), 'replaced');
-      await sleep(1500);
+      await this.kill(existing.map((i) => i.pid), 'replaced'); // kill() already waits until the processes are gone
     }
     if (this.settings.get('multiInstance')) {
       await this.applyMulti();
@@ -625,8 +645,10 @@ class Launcher extends EventEmitter {
 
     const deadline = Date.now() + this.settings.get('launchTimeoutSec') * 1000;
     let found = null;
+    let pollMs = 300; // first look soon after spawn, then every 600ms (each look is one helper round trip)
     while (Date.now() < deadline) {
-      await sleep(1000);
+      await sleep(pollMs);
+      pollMs = 600;
       const procs = await this.helper.procs().catch(() => []);
       const tagged = procs.filter((p) => p.btid === btid && !this.isTombstoned(p));
       found = tagged.sort((a, b) => Date.parse(b.start || 0) - Date.parse(a.start || 0))[0];
