@@ -16,6 +16,8 @@ const REASONS = {
   285: 'left the game', 286: 'server full / unavailable', 288: 'experience restricted',
 };
 const SAME_ACCOUNT = new Set([264, 273]);
+// Roblox refused the sign-in ticket. The client logs this and quits.
+const AUTH_FAIL_RE = /WebLogin authentication is failed|WebLogin HTTP error, statusCode: 403/;
 // A captcha / security check shown inside the Roblox client.
 const VERIFY_RE = /\b(?:captcha|funcaptcha|arkose|rblx-challenge|challengeRequired|challenge (?:is )?required|human verification|verify (?:that )?you(?:'re| are) (?:a )?human)\b/i;
 
@@ -36,6 +38,12 @@ class LogWatcher extends EventEmitter {
     this.dir = dir;
     this.claimed = new Set(); // log files already tied to an instance
     this.files = new Map();   // pid -> {file, offset, rest}
+    this.side = new Map();    // full path -> {btid, file, offset, rest}: the second log of a launch (starter + client)
+    this.on('authfail', (inst) => {
+      if (this.launcher && typeof this.launcher.retryAuth === 'function') {
+        this.launcher.retryAuth(inst).catch((e) => log.error('sign-in retry: ' + e.message));
+      }
+    });
   }
 
   start() {
@@ -50,6 +58,11 @@ class LogWatcher extends EventEmitter {
     for (const inst of insts) {
       const f = this.files.get(inst.pid);
       if (f) this.read(inst, f);
+    }
+    for (const [full, sf] of this.side) {
+      const inst = insts.find((i) => i.btid === sf.btid);
+      if (!inst) { this.side.delete(full); continue; }
+      this.readSide(inst, sf);
     }
   }
 
@@ -77,11 +90,15 @@ class LogWatcher extends EventEmitter {
         } catch { continue; }
         if (!head.includes(`suggestedBrowserTrackerId=${inst.btid}`)) continue;
         this.claimed.add(c.full);
+        if (this.files.has(inst.pid)) {
+          // Roblox's starter and the real client each write their own log for one launch: watch the extra one too
+          this.side.set(c.full, { btid: inst.btid, file: c.full, offset: 0, rest: '' });
+          continue;
+        }
         // replay the whole file once so state (joined server, disconnects) is correct after adoption
         this.files.set(inst.pid, { file: c.full, offset: 0, rest: '' });
         inst.logState = inst.logState || { inGame: false };
         log.debug(`pid ${inst.pid} -> ${path.basename(c.full)}`);
-        break;
       }
       // give up after 3 minutes (e.g. log folder elsewhere); presence checks still cover it
       if (!this.files.has(inst.pid) && Date.now() - inst.startedAt > 180000) inst.logMissing = true;
@@ -109,6 +126,10 @@ class LogWatcher extends EventEmitter {
 
   parse(inst, line) {
     const s = inst.logState || (inst.logState = { inGame: false });
+    if (AUTH_FAIL_RE.test(line)) {
+      if (!s.authFailed) { s.authFailed = true; this.emit('authfail', inst, line.slice(0, 300)); }
+      return;
+    }
     let m = line.match(/! Joining game '([0-9a-f-]{36})' place (\d+)/i);
     if (m) {
       Object.assign(s, { inGame: true, jobId: m[1].toLowerCase(), placeId: Number(m[2]), joinedAt: Date.now(), disconnectedAt: 0, code: 0, reason: '' });
@@ -141,6 +162,26 @@ class LogWatcher extends EventEmitter {
       s.reason = REASONS[s.code] || (s.code ? `code ${s.code}` : 'connection lost');
       this.emit('disconnect', inst, s);
       this.launcher.emit('change');
+    }
+  }
+
+  readSide(inst, sf) {
+    let size;
+    try { size = fs.statSync(sf.file).size; } catch { return; }
+    if (size < sf.offset) { sf.offset = 0; sf.rest = ''; }
+    if (size === sf.offset) return;
+    const len = Math.min(size - sf.offset, 4 * 1024 * 1024);
+    const buf = Buffer.alloc(len);
+    try {
+      const fd = fs.openSync(sf.file, 'r');
+      fs.readSync(fd, buf, 0, len, sf.offset);
+      fs.closeSync(fd);
+    } catch { return; }
+    sf.offset += len;
+    const lines = (sf.rest + buf.toString('utf8')).split('\n');
+    sf.rest = lines.pop();
+    for (const line of lines) {
+      if (AUTH_FAIL_RE.test(line)) { this.emit('authfail', inst, line.slice(0, 300)); return; }
     }
   }
 

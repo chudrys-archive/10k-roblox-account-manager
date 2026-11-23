@@ -773,6 +773,33 @@ class Launcher extends EventEmitter {
     return results.concat(await Promise.all(ps));
   }
 
+  /**
+   * Roblox refused the sign-in ticket: the client logs "WebLogin HTTP error, statusCode: 403" and quits.
+   * Replace it with a client that has a fresh ticket. At most 3 retries per account in 10 minutes, so a
+   * refusal that never clears can't loop.
+   */
+  async retryAuth(inst) {
+    if (inst.authHandled) return;
+    inst.authHandled = true;
+    const acc = this.accounts.get(inst.accountId);
+    if (!acc) return;
+    this.authRetries = this.authRetries || new Map();
+    const recent = (this.authRetries.get(acc.id) || []).filter((t) => Date.now() - t < 600000);
+    if (recent.length >= 3) {
+      this.authRetries.set(acc.id, recent);
+      log.error(acc.username + ': Roblox keeps refusing this sign-in (403) after ' + recent.length + ' fresh tickets. Not retrying. Check the account (Validate, or log in again).');
+      this.emit('change');
+      return;
+    }
+    recent.push(Date.now());
+    this.authRetries.set(acc.id, recent);
+    log.warn(acc.username + ': Roblox refused the sign-in ticket (403). Relaunching with a fresh ticket (' + recent.length + '/3).');
+    await this.kill([inst.pid], 'sign-in refused');
+    await sleep(this.authRetryDelayMs ?? (3000 + Math.random() * 2000));
+    await this.launch(acc.id, inst.target || this.currentTarget(acc), 'sign-in retry', { replace: true })
+      .catch((e) => log.error(acc.username + ': sign-in retry failed: ' + e.message));
+  }
+
   async kill(pids, why = 'manual') {
     pids = [].concat(pids).filter(Boolean).map(Number);
     if (!pids.length) return 0;
