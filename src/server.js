@@ -255,8 +255,10 @@ class Server {
           }, 8000);
           let cookie;
           try { cookie = await c.browser.login(entry); } finally { clearTimeout(notConnected); }
-          const { account } = await c.accounts.addCookie(cookie, { group: body.group || undefined, password: body.savePasswords ? entry.password : undefined });
-          this.toast('ok', `Logged in as ${account.username}`);
+          const { account, created } = await c.accounts.addCookie(cookie, { group: body.group || undefined, keepExisting: true });
+          // a password is saved only when the account that signed in is the one on this line
+          if (body.savePasswords && entry.password && entry.username && account.username.toLowerCase() === entry.username.toLowerCase()) c.accounts.update(account.id, { password: entry.password });
+          this.toast('ok', created ? `Added ${account.username}` : `${account.username} is already in your list. Cookie refreshed.`);
           return true;
         } catch (e) {
           this.toast('error', `Login${entry.username ? ` (${entry.username})` : ''} failed: ${e.message}`);
@@ -288,8 +290,8 @@ class Server {
         try {
           this.toast('info', 'Chrome opened the Roblox sign-up page. Create the account there and it is added automatically.');
           const cookie = await c.browser.login({ label: 'new account', url: 'https://www.roblox.com/signup' });
-          const { account } = await c.accounts.addCookie(cookie, { group: body.group || undefined });
-          this.toast('ok', `Created and added ${account.username}`);
+          const { account, created } = await c.accounts.addCookie(cookie, { group: body.group || undefined, keepExisting: true });
+          this.toast('ok', created ? `Created and added ${account.username}` : `${account.username} is already in your list. Cookie refreshed.`);
         } catch (e) {
           this.toast('error', `Create account: ${e.message}`);
         }

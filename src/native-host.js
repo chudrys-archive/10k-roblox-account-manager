@@ -77,9 +77,12 @@ function main() {
       if (!m || m.type !== 'cookie') continue;
       readPending = false;
       const lock = readLock(dataDir);
-      if (lock && typeof m.value === 'string' && m.value) {
-        try { await request(lock, 'POST', '/capture/offer', { cookie: m.value }); } catch { /* manager gone */ }
-      }
+      if (!lock) continue;
+      const value = typeof m.value === 'string' && m.value ? m.value : null;
+      try {
+        const r = await request(lock, 'POST', '/capture/offer', { cookie: value });
+        if (r && r.accepted) send({ type: 'close' });
+      } catch { /* manager gone */ }
     }
   });
   process.stdin.on('end', () => process.exit(0));

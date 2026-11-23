@@ -61,6 +61,7 @@ test('native host: asks the extension for a cookie only while armed, then hands 
     const cookie = 'COOKIE-' + 'y'.repeat(30);
     child.stdin.write(encode({ type: 'cookie', value: cookie }));
     await waitFor(() => state.offers.length === 1);
+    await waitFor(() => frames.some((f) => f.type === 'close'));
     assert.equal(state.offers[0], cookie);
   } finally {
     child.stdin.end();

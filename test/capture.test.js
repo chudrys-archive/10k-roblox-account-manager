@@ -10,21 +10,42 @@ const { CaptureGate } = require('../src/capture');
 const { registerCapture, EXTENSION_ID } = require('../src/nativehost');
 
 const COOKIE = 'c'.repeat(40);
+const OLD = 'o'.repeat(40);
 
-test('capture: an armed wait takes one cookie, then the gate is idle again', async () => {
+test('capture: after the starting reading, a new cookie is taken once, then the gate is idle', async () => {
   const g = new CaptureGate();
   const w = g.arm({ label: 'x' });
   assert.equal(g.status().armed, true);
   assert.equal(g.status().label, 'x');
+  assert.equal(g.offer(null), false, 'the starting reading is never taken');
   assert.equal(g.offer(COOKIE), true);
   assert.equal(await w, COOKIE);
   assert.equal(g.armed(), false);
   assert.equal(g.offer(COOKIE), false, 'nothing is taken while idle');
 });
 
-test('capture: values that are not cookies are refused and the wait stays armed', async () => {
+test('capture: a cookie already there when you armed is never taken', async () => {
   const g = new CaptureGate();
   const w = g.arm();
+  assert.equal(g.offer(OLD), false, 'already signed in before the window');
+  assert.equal(g.offer(OLD), false, 'same session still');
+  assert.equal(g.armed(), true);
+  g.cancel();
+  await assert.rejects(w, /cancelled/);
+});
+
+test('capture: a different cookie after the starting reading is taken', async () => {
+  const g = new CaptureGate();
+  const w = g.arm();
+  g.offer(OLD);
+  assert.equal(g.offer(COOKIE), true);
+  assert.equal(await w, COOKIE);
+});
+
+test('capture: values that are not cookies are never taken', async () => {
+  const g = new CaptureGate();
+  const w = g.arm();
+  g.offer(null);
   assert.equal(g.offer('short'), false);
   assert.equal(g.offer(undefined), false);
   assert.equal(g.armed(), true);
@@ -32,10 +53,10 @@ test('capture: values that are not cookies are refused and the wait stays armed'
   await assert.rejects(w, /cancelled/);
 });
 
-test('capture: a wait with no cookie times out and clears', async () => {
+test('capture: a wait with no new cookie times out, with a hint to sign out', async () => {
   const g = new CaptureGate();
   const w = g.arm({ timeoutMs: 30 });
-  await assert.rejects(w, /timed out/);
+  await assert.rejects(w, /timed out.*sign out/);
   assert.equal(g.armed(), false);
 });
 
@@ -52,6 +73,7 @@ test('capture: arming again supersedes the old wait', async () => {
 test('capture: the gate keeps no cookie after a take', async () => {
   const g = new CaptureGate();
   const w = g.arm();
+  g.offer(null);
   g.offer(COOKIE);
   await w;
   assert.equal(g.pending, null);

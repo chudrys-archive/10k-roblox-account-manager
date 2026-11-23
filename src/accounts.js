@@ -118,10 +118,13 @@ class AccountStore extends EventEmitter {
     acc.cookieUpdatedAt = Date.now();
     acc.username = me.name; acc.displayName = me.displayName;
     acc.status = 'valid'; acc.statusMsg = ''; acc.lastValidatedAt = Date.now();
-    if (extra.group) acc.group = extra.group;
-    if (extra.alias) acc.alias = extra.alias;
-    if (extra.password) acc.password = extra.password;
-    if (extra.description) acc.description = extra.description;
+    // keepExisting: a sign-in that matches an account already in the list refreshes its cookie and nothing else
+    if (!(!created && extra.keepExisting)) {
+      if (extra.group) acc.group = extra.group;
+      if (extra.alias) acc.alias = extra.alias;
+      if (extra.password) acc.password = extra.password;
+      if (extra.description) acc.description = extra.description;
+    }
     this.sessions.delete(acc.id);
     this.save();
     log.info(`${created ? 'added' : 'updated'} account ${acc.username} (${acc.userId})`);
