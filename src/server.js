@@ -179,6 +179,7 @@ class Server {
         ? detectRoblox('', settings.get('testClientPath'))
         : this.robloxInfo || (this.robloxInfo = detectRoblox(settings.get('robloxPath'))),
       browserFound: !!findBrowser(settings.get('browserPath')),
+      update: this.ctx.updates ? this.ctx.updates.publicView() : null,
       apiUrl: `http://127.0.0.1:${this.port}/api/`,
     };
   }

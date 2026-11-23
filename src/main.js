@@ -15,6 +15,7 @@ const { BrowserManager, findBrowser } = require('./browser');
 const { Server } = require('./server');
 const { AntiAfk } = require('./antiafk');
 const { CaptchaGuard } = require('./captchaguard');
+const { UpdateChecker } = require('./updatecheck');
 const { History } = require('./history');
 
 const log = logger('main');
@@ -155,7 +156,9 @@ async function main() {
     }
   };
 
-  const ctx = { settings, vault, accounts, launcher, watchdog, browser, antiAfk, alerts, guard, history, onUnlocked, createShortcut };
+  const updates = new UpdateChecker();
+updates.start();
+const ctx = { settings, vault, accounts, launcher, watchdog, browser, antiAfk, alerts, guard, history, onUnlocked, createShortcut, updates };
   const server = new Server(ctx);
   const port = await server.listen();
   atomicWrite(LOCK, JSON.stringify({ pid: process.pid, port, token: server.token }));

@@ -43,6 +43,7 @@ try {
             @{ Path = $node; Entry = 'node.exe' }
             @{ Path = $license; Entry = 'NODE-LICENSE.txt' }
             @{ Path = (Join-Path $root 'assets\icon.ico'); Entry = 'assets/icon.ico' }
+        @{ Path = (Join-Path $root 'package.json'); Entry = 'package.json' }
         )
         $sourceFiles = Get-ChildItem -LiteralPath (Join-Path $root 'src') -File |
             Where-Object Extension -In '.js', '.ps1'

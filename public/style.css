@@ -252,6 +252,9 @@ label.f { display: block; color: var(--text2); font-size: 12px; margin: 12px 0 5
 /* captcha guard banner: shown while automatic activity is paused */
 .guard-banner { margin: 0 0 14px; padding: 14px 16px; border: 1.5px solid var(--warn, #fbbf24); border-radius: 12px; background: var(--accent-soft); color: var(--text); font-size: 13px; line-height: 1.5; }
 .guard-banner b { font-weight: 700; }
+.update-banner { margin: 0 0 14px; padding: 12px 16px; border: 1.5px solid var(--accent, #60a5fa); border-radius: 12px; background: var(--accent-soft); color: var(--text); font-size: 13px; line-height: 1.5; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.update-banner a { color: var(--accent, #60a5fa); font-weight: 600; }
+.update-banner .spacer { flex: 1; }
 
 /* account History timeline in the Details dialog */
 .hist { list-style: none; margin: 6px 0 0; padding: 0; max-height: 220px; overflow: auto; border: 1px solid var(--line); border-radius: 10px; }

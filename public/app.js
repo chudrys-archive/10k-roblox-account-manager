@@ -275,6 +275,25 @@ function renderSide() {
 }
 
 // Skip innerHTML when the markup did not change, so rows keep hover, focus and selection across the 1 s / 10 s refresh.
+// Newer release notice (the manager only tells you; download and install are yours). Dismissed per version.
+function renderUpdate() {
+  const el = $('#update-banner');
+  const u = S && S.update;
+  const dismissed = !!(u && localStorage.getItem('updateDismissed') === u.latest);
+  const show = !!(u && u.available && !dismissed);
+  el.classList.toggle('hidden', !show);
+  if (!show) { el.innerHTML = ''; return; }
+  const sig = u.latest + '|' + u.url;
+  if (el.dataset.sig === sig) return;
+  el.dataset.sig = sig;
+  el.innerHTML = `<span><b>Version ${esc(u.latest)} is out</b> (you have ${esc(u.current)}).</span>
+    <a href="${esc(u.url || 'https://github.com/chudrys-archive/10k-roblox-account-manager/releases/latest')}" target="_blank" rel="noopener">Open the release</a>
+    <span class="spacer"></span>
+    <button class="btn ghost sm" data-update-dismiss>Dismiss</button>`;
+}
+$('#update-banner').addEventListener('click', (e) => {
+  if (e.target.closest('[data-update-dismiss]') && S && S.update) { localStorage.setItem('updateDismissed', S.update.latest); renderUpdate(); }
+});
 const htmlCache = new Map();
 function setHtml(sel, html) {
   if (htmlCache.get(sel) === html) return;
@@ -307,6 +326,7 @@ function renderStats() {
   const t = `${inst.length ? `(${inst.length}) ` : ''}Isa's Roblox Account Manager`;
   if (document.title !== t) document.title = t;
   renderQueueBanner();
+  renderUpdate();
   $('#btn-check-ban').disabled = (S.browsers || []).some((b) => b.kind === 'login');
   setHtml('#stats', cards.map(([ic, l, v, h]) => `<div class="stat"><div class="label">${icon(ic)}${l}</div><div class="val">${v}</div><div class="hint">${h}</div></div>`).join(''));
 }
