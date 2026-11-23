@@ -20,7 +20,13 @@ const PROFILES = {
 function buildFlags({ fastProfile = 'off', fpsCap = 0, customFFlags = '' } = {}) {
   const flags = { ...(PROFILES[fastProfile] || PROFILES.off) };
   if (fpsCap) flags.DFIntTaskSchedulerTargetFps = fpsCap;
-  if (customFFlags) Object.assign(flags, JSON.parse(customFFlags));
+  if (customFFlags) {
+    // settings reject invalid JSON on save; a hand-edited file must not break every launch
+    try {
+      const extra = JSON.parse(customFFlags);
+      if (extra && typeof extra === 'object' && !Array.isArray(extra)) Object.assign(flags, extra);
+    } catch { /* ignored */ }
+  }
   return flags;
 }
 

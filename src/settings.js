@@ -4,8 +4,11 @@ const EventEmitter = require('events');
 const { DATA, atomicWrite, readJson, deepMerge } = require('./util');
 
 const FILE = path.join(DATA, 'settings.json');
+// Bump when the safe defaults change. Installs saved at an older version get the safe defaults once.
+const SETTINGS_VERSION = 2;
 
 const DEFAULTS = {
+  settingsVersion: SETTINGS_VERSION,
   port: 7963,
   openUiOnStart: true,
   autoValidateOnStart: true,
@@ -15,10 +18,10 @@ const DEFAULTS = {
   multiInstance: true,
   launchDelaySec: 6,           // gap between consecutive launches (Roblox rate-limits rapid joins)
   launchTimeoutSec: 90,        // how long to wait for the Roblox process to appear
-  onAlreadyRunning: 'replace', // 'replace' | 'skip' | 'allow'
+  onAlreadyRunning: 'skip',    // 'replace' | 'skip' | 'allow'. 'replace' closes the running client (and any executor in it)
   robloxPath: '',              // blank = auto-detect (registry handler / Versions folder)
   testClientPath: '',          // exact RobloxPlayerBeta.exe for compatibility testing
-  neverUpdateRoblox: false,    // "Don't update Roblox": start the installed client directly and disable Roblox's updater
+  neverUpdateRoblox: false,    // "Don't update Roblox": start the installed client directly and disable Roblox's updater (off = safe)
   skipUpdateCheck: true,       // launch RobloxPlayerBeta.exe directly when the installed version is current
   renameWindows: true,
   windowTitle: '{name}',       // {name} {username} {alias} {userId} {group}
@@ -26,7 +29,7 @@ const DEFAULTS = {
   tileColumns: 0,              // 0 = auto
   fastProfile: 'off',          // 'off' | 'low' | 'lowest': see src/fflags.js (texture quality, post-processing)
   fpsCap: 0,                   // 0 = don't touch ClientAppSettings
-  customFFlags: '',            // raw JSON merged into ClientAppSettings.json
+  customFFlags: '',            // raw JSON merged into ClientAppSettings.json (empty = safe)
 
   // keep-alive watchdog
   watchdog: {
@@ -38,7 +41,7 @@ const DEFAULTS = {
     badChecksToRestart: 2,
     disconnectGraceSec: 25,    // log says disconnected and no rejoin within this -> restart
     relaunchDelaySec: 15,       // first rejoin; repeated rejoins back off (x2 each, max 10 min)
-    killHungAfterSec: 120,
+    killHungAfterSec: 0,        // 0 = never force-kill a frozen client (a kill also closes any executor in it)
     maxRelaunchesPerHour: 15,
     fallbackToPublic: true,    // if a specific JobId keeps failing, join any server instead
     restartEveryMin: 0,        // 0 = never; otherwise scheduled restart of keep-alive clients
@@ -55,7 +58,7 @@ const DEFAULTS = {
 
   // anti-AFK: Roblox kicks after 20 idle minutes
   antiAfk: {
-    enabled: true,
+    enabled: false,            // off = safe: it focuses Roblox windows and sends input
     intervalMin: 12,           // nudge each client this often (max 16 so the +3 min grace stays under 20)
     action: 'space',           // 'space' (jump) | 'wasd' (step fwd+back) | 'rightclick' (camera) | 'key'
     key: '',                   // used when action = 'key' (A-Z, 0-9, F1-F24)
@@ -94,7 +97,18 @@ const DEFAULTS = {
 class Settings extends EventEmitter {
   constructor() {
     super();
-    this.data = deepMerge(DEFAULTS, readJson(FILE, {}));
+    const saved = readJson(FILE, {});
+    this.data = deepMerge(DEFAULTS, saved);
+    if ((saved.settingsVersion || 0) < SETTINGS_VERSION) {
+      // one-time: installs saved before the safe defaults move onto them. Accounts, alerts and the
+      // other preferences are kept; only settings that can close clients or upset the display change.
+      const d = this.data;
+      Object.assign(d, { neverUpdateRoblox: false, fastProfile: 'off', fpsCap: 0, customFFlags: '', clientPriority: 'Normal', trimMemoryMin: 0, onAlreadyRunning: 'skip' });
+      d.antiAfk = { ...d.antiAfk, enabled: false };
+      d.watchdog = { ...d.watchdog, killHungAfterSec: 0, restartEveryMin: 0 };
+      d.settingsVersion = SETTINGS_VERSION;
+      try { this.save(); } catch { /* read-only data dir: the safe values still apply for this run */ }
+    }
   }
   get(k) { return k ? this.data[k] : this.data; }
   update(patch) {
@@ -110,14 +124,14 @@ class Settings extends EventEmitter {
     next.tileColumns = num(next.tileColumns, 0, 0, 20);
     if (!['off', 'low', 'lowest'].includes(next.fastProfile)) next.fastProfile = 'off';
     next.fpsCap = num(next.fpsCap, 0, 0, 1000);
-    if (!['replace', 'skip', 'allow'].includes(next.onAlreadyRunning)) next.onAlreadyRunning = 'replace';
+    if (!['replace', 'skip', 'allow'].includes(next.onAlreadyRunning)) next.onAlreadyRunning = 'skip'; // invalid value: never the closing mode
     const w = next.watchdog;
     w.tickSec = num(w.tickSec, 5, 2, 60);
     w.presenceIntervalSec = num(w.presenceIntervalSec, 45, 20, 600);
     w.graceSec = num(w.graceSec, 150, 30, 1200);
     w.badChecksToRestart = num(w.badChecksToRestart, 2, 1, 10);
     w.relaunchDelaySec = num(w.relaunchDelaySec, 15, 0, 600);
-    w.killHungAfterSec = num(w.killHungAfterSec, 120, 0, 3600);
+    w.killHungAfterSec = num(w.killHungAfterSec, 0, 0, 3600);
     w.maxRelaunchesPerHour = num(w.maxRelaunchesPerHour, 15, 1, 120);
     w.restartEveryMin = num(w.restartEveryMin, 0, 0, 1440);
     w.breakerDisconnects = num(w.breakerDisconnects, 4, 0, 50);
