@@ -76,7 +76,7 @@ using System.Reflection;
         "/resource:$wv2Loader,WebView2Loader.dll"
         "/resource:$wv2Core,Microsoft.Web.WebView2.Core.dll"
         "/resource:$wv2Forms,Microsoft.Web.WebView2.WinForms.dll"
-        '/reference:System.Windows.Forms.dll', '/reference:System.IO.Compression.dll'
+        '/reference:System.Windows.Forms.dll', '/reference:System.IO.Compression.dll', '/reference:System.Drawing.dll'
         '/reference:System.IO.Compression.FileSystem.dll'
         "/reference:$wv2Core"
         "/reference:$wv2Forms"

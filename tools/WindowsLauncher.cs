@@ -184,7 +184,7 @@ internal static class WindowsLauncher
             // ShowManagerWindow is a separate method so its body is JIT-compiled
             // only after the assembly resolver above is registered — that guarantees
             // the WebView2 managed DLLs resolve from embedded resources.
-            ShowManagerWindow(managerUrl, appDir, nodeProcess);
+            ShowChromeWindow(managerUrl, appDir, nodeProcess, runtime);
 
             // Form closed: kill node if it is still running.
             try { if (!nodeProcess.HasExited) nodeProcess.Kill(); } catch { }
@@ -225,6 +225,84 @@ internal static class WindowsLauncher
 
             Application.Run(form);
         }
+    }
+
+    // The manager window is a Chrome app window (Edge if Chrome is missing) in its own profile, with a black caption.
+    // Closing it quits the manager, the same as closing the old WebView2 window.
+    private static void ShowChromeWindow(string url, string appDir, Process nodeProcess, string runtime)
+    {
+        string browser = FindChromium();
+        if (browser == null)
+            throw new InvalidOperationException("Chrome or Edge is needed to show the manager window.");
+
+        string profile = Path.Combine(appDir, "app-browser");
+        Directory.CreateDirectory(profile);
+
+        // A window left from an earlier run would make this launch hand off to it and exit at once.
+        KillBrowsersOnProfile(profile);
+
+        var win = Process.Start(new ProcessStartInfo(browser,
+            "--user-data-dir=\"" + profile + "\" --app=" + url +
+            " --window-size=1400,900 --no-first-run --no-default-browser-check")
+        { UseShellExecute = false });
+        if (win == null)
+            throw new InvalidOperationException("The browser for the manager window did not start.");
+
+        Process titlebar = null;
+        try
+        {
+            string script = Path.Combine(runtime, "src", "titlebar.ps1");
+            if (File.Exists(script))
+                titlebar = Process.Start(new ProcessStartInfo("powershell.exe",
+                    "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File \"" + script + "\"")
+                { UseShellExecute = false, CreateNoWindow = true });
+        }
+        catch { }
+
+        try
+        {
+            // Wait until the window closes or the manager stops.
+            while (!win.HasExited && !nodeProcess.HasExited) Thread.Sleep(500);
+        }
+        finally
+        {
+            try { if (titlebar != null && !titlebar.HasExited) titlebar.Kill(); } catch { }
+            try { if (!win.HasExited) win.Kill(); } catch { }
+            win.Dispose();
+        }
+    }
+
+    private static string FindChromium()
+    {
+        string pf   = Environment.GetEnvironmentVariable("ProgramFiles") ?? @"C:\Program Files";
+        string pf86 = Environment.GetEnvironmentVariable("ProgramFiles(x86)") ?? @"C:\Program Files (x86)";
+        string la   = Environment.GetEnvironmentVariable("LOCALAPPDATA") ?? "";
+        string[] candidates = {
+            Path.Combine(pf, "Google", "Chrome", "Application", "chrome.exe"),
+            Path.Combine(pf86, "Google", "Chrome", "Application", "chrome.exe"),
+            Path.Combine(la, "Google", "Chrome", "Application", "chrome.exe"),
+            Path.Combine(pf86, "Microsoft", "Edge", "Application", "msedge.exe"),
+            Path.Combine(pf, "Microsoft", "Edge", "Application", "msedge.exe"),
+        };
+        foreach (var c in candidates)
+            if (File.Exists(c)) return c;
+        return null;
+    }
+
+    // Stops browser processes that were started with this profile (only ours, never the user's own browser).
+    private static void KillBrowsersOnProfile(string profile)
+    {
+        try
+        {
+            string script = "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like ('*user-data-dir=\"' + '" +
+                profile.Replace("'", "''") + "' + '*') } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }";
+            string enc = Convert.ToBase64String(Encoding.Unicode.GetBytes(script));
+            var p = Process.Start(new ProcessStartInfo("powershell.exe",
+                "-NoProfile -NonInteractive -EncodedCommand " + enc)
+            { UseShellExecute = false, CreateNoWindow = true });
+            if (p != null) p.WaitForExit(10000);
+        }
+        catch { }
     }
 
     // Poll DATA/manager.lock until {port, token} appear and the PID is alive.
@@ -542,6 +620,8 @@ internal sealed class ManagerForm : Form
         _wv     = new WebView2();
 
         Text          = Title;
+        // Window icon: the same multi-size icon the exe carries.
+        try { Icon = System.Drawing.Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
         Width         = 1400;
         Height        = 900;
         StartPosition = FormStartPosition.CenterScreen;
@@ -550,6 +630,19 @@ internal sealed class ManagerForm : Form
         Controls.Add(_wv);
 
         Load += OnFormLoadAsync;
+    }
+
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
+
+    // Black caption on Windows 11 (dark mode on Windows 10 1809+). Best effort: an older Windows keeps the light bar.
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+        int dark = 1, caption = 0x000000, text = 0x00FFFFFF; // COLORREF is 0x00BBGGRR
+        DwmSetWindowAttribute(Handle, 20, ref dark, 4);    // DWMWA_USE_IMMERSIVE_DARK_MODE
+        DwmSetWindowAttribute(Handle, 35, ref caption, 4); // DWMWA_CAPTION_COLOR
+        DwmSetWindowAttribute(Handle, 36, ref text, 4);    // DWMWA_TEXT_COLOR
     }
 
     private async void OnFormLoadAsync(object sender, EventArgs e)
