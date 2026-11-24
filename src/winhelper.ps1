@@ -304,7 +304,7 @@ function Get-RobloxProcs {
     try { $start = $c.CreationDate.ToUniversalTime().ToString('o') } catch { }
     [void]$list.Add(@{
       pid = $procId; btid = $btid; hwnd = [int64]$h; title = $title; hung = $hung; minimized = $minimized
-      memMB = [math]::Round($p.WorkingSet64 / 1MB); start = $start
+      memMB = [math]::Round($p.WorkingSet64 / 1MB); privMB = [math]::Round($p.PrivateMemorySize64 / 1MB); start = $start
     })
   }
   return , $list.ToArray()

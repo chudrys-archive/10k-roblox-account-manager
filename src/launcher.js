@@ -12,10 +12,12 @@ const log = logger('launcher');
 const INSTANCES_FILE = path.join(DATA, 'instances.json');
 const LOCK_STATUS = path.join(DATA, 'lockholder.json');
 const LOCK_STOP = path.join(DATA, 'lockholder.stop');
-// A client holds about 8-9.2 GB of commit (measured with 9 clients on 7.1.4). Starting another one when
-// less than this is free makes Windows fail allocations (error 1455) and kills clients that are running.
-const COMMIT_RESERVE_BYTES = 10 * 1024 ** 3;
 const GB = 1024 ** 3;
+// A client's commit keeps growing for minutes after it starts, so a launch-time reading alone is not enough.
+// Windows fails allocations (error 1455) once commit reaches the limit (RAM + page file) and kills clients.
+const COMMIT_RESERVE_BYTES = 10 * GB;     // keep at least this free before a launch
+const COMMIT_KEEP_FREE_BYTES = 6 * GB;    // never plan clients into the last of the limit
+const COMMIT_PER_CLIENT_BYTES = 8 * GB;   // assumed per client until a running one has been measured
 
 // Roblox keeps the last session's cookie in LocalStorage\RobloxCookies.dat and rewrites it on every start and exit.
 // A client that starts with another account's cookie in that file can have its ticket redeem refused (403).
@@ -578,17 +580,32 @@ class Launcher extends EventEmitter {
    * if one is still running after that, the launch is refused. If the process list can't be read, it is refused too.
    */
   /**
-   * Refuses to start a client when Windows has less than COMMIT_RESERVE_BYTES of commit headroom.
+   * Refuses a launch when it would not fit in Windows commit. Two checks:
+   *  - free commit must be at least COMMIT_RESERVE_BYTES;
+   *  - the number of running clients must be below what the commit limit can hold, planned from the
+   *    largest private commit any running client has reached (plus a 15% margin), keeping
+   *    COMMIT_KEEP_FREE_BYTES back. This is what stops a 10th client from pushing nine others over the limit.
    * The watchdog treats a refusal as "wait", not a failed launch. If the reading is unavailable
-   * (helper down), the launch goes ahead as before.
+   * (helper down or too old), the launch goes ahead as before.
    */
   async commitGate(name) {
     let m = null;
     try { m = this.helper.memory ? await this.helper.memory() : null; } catch (e) { log.debug('commit check skipped: ' + e.message); return; }
     if (!m || !(m.freeBytes >= 0)) return;
-    log.info(`commit headroom ${(m.freeBytes / GB).toFixed(1)} GB before launching ${name}`);
-    if (m.freeBytes >= COMMIT_RESERVE_BYTES) return;
-    throw Object.assign(new Error(`${name}: not enough free commit memory to start another client (${(m.freeBytes / GB).toFixed(1)} GB free, need ${COMMIT_RESERVE_BYTES / GB} GB). Waiting for a client to close.`), { commitShort: true });
+    let running = [];
+    try { running = this.helper.procs ? await this.helper.procs() : []; } catch { running = []; }
+    const peak = Math.max(COMMIT_PER_CLIENT_BYTES, ...running.map((p) => (p.privMB || 0) * 1024 * 1024));
+    const perClient = peak * 1.15;
+    const haveLimit = m.limitBytes > 0;
+    const cap = haveLimit ? Math.max(0, Math.floor((m.limitBytes - COMMIT_KEEP_FREE_BYTES) / perClient)) : Infinity;
+    log.info(`commit ${(m.freeBytes / GB).toFixed(1)} GB free${haveLimit ? ` of ${(m.limitBytes / GB).toFixed(1)} GB` : ''}, ${running.length} clients running, room for ${cap === Infinity ? 'unknown' : cap}; before launching ${name}`);
+    const wait = (why) => Object.assign(new Error(`${name}: ${why}. Waiting for a client to close.`), { commitShort: true });
+    if (m.freeBytes < COMMIT_RESERVE_BYTES) {
+      throw wait(`not enough free commit memory to start another client (${(m.freeBytes / GB).toFixed(1)} GB free, need ${COMMIT_RESERVE_BYTES / GB} GB)`);
+    }
+    if (running.length >= cap) {
+      throw wait(`this PC has commit room for ${cap} clients at about ${(perClient / GB).toFixed(1)} GB each, and ${running.length} are already running`);
+    }
   }
 
   async assertNoOtherClient() {
