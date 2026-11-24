@@ -903,7 +903,7 @@ class Launcher extends EventEmitter {
 
   /**
    * Roblox refused the sign-in ticket: the client logs "WebLogin HTTP error, statusCode: 403" and quits.
-   * Replace it with a client that has a fresh ticket. At most 3 retries per account in 10 minutes, so a
+   * Replace it with a client that has a fresh ticket. At most one retry per account in 30 minutes, so a
    * refusal that never clears can't loop.
    */
   async retryAuth(inst) {
@@ -914,18 +914,18 @@ class Launcher extends EventEmitter {
     const acc = this.accounts.get(inst.accountId);
     if (!acc) return;
     this.authRetries = this.authRetries || new Map();
-    const recent = (this.authRetries.get(acc.id) || []).filter((t) => Date.now() - t < 600000);
-    if (recent.length >= 2) {
+    const recent = (this.authRetries.get(acc.id) || []).filter((t) => Date.now() - t < 30 * 60000);
+    if (recent.length >= 1) {
       this.authRetries.set(acc.id, recent);
-      log.error(acc.username + ': Roblox keeps refusing this sign-in (403) after ' + recent.length + ' fresh tickets. Not retrying. Check the account (Validate, or log in again).');
+      log.error(acc.username + ': Roblox refused this sign-in (403) again within 30 minutes of a fresh-ticket retry. Not retrying. Check the account (Validate, or log in again).');
       this.emit('change');
       return;
     }
     recent.push(Date.now());
     this.authRetries.set(acc.id, recent);
-    log.warn(acc.username + ': Roblox refused the sign-in ticket (403). Relaunching with a fresh ticket (' + recent.length + '/2).');
+    log.warn(acc.username + ': Roblox refused the sign-in ticket (403). Relaunching once with a fresh ticket.');
     await this.kill([inst.pid], 'sign-in refused');
-    await sleep(this.authRetryDelayMs ?? (recent.length === 1 ? 10000 : 30000));
+    await sleep(this.authRetryDelayMs ?? 10000);
     if (this.isHeld(acc.id)) { log.info(acc.username + ': stopped while waiting to retry the sign-in; not relaunching'); return; }
     await this.launch(acc.id, inst.target || this.currentTarget(acc), 'sign-in retry', { replace: true })
       .catch((e) => log.error(acc.username + ': sign-in retry failed: ' + e.message));

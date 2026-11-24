@@ -7,7 +7,8 @@ const log = logger('captcha-guard');
 const FILE = path.join(DATA, 'captcha-guard.json');
 // Launches that happen without the person at the keyboard. These stop while the guard is paused.
 // Buttons in the UI and the Launch / Restart actions are the person's own choice and keep working.
-const AUTOMATED = new Set(['keep-alive', 'api']);
+// 'sign-in retry' is the automatic relaunch after Roblox refuses a ticket (403): it must stop too.
+const AUTOMATED = new Set(['keep-alive', 'api', 'sign-in retry']);
 const BLANK = { paused: false, since: 0, account: '', reason: '', resumeAt: 0 };
 
 /**

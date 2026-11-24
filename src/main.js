@@ -202,6 +202,15 @@ const ctx = { settings, vault, accounts, launcher, watchdog, browser, antiAfk, a
   process.on('SIGHUP', () => shutdown('SIGHUP')); // console window closed
   process.on('uncaughtException', (e) => log.error('uncaught: ' + (e.stack || e.message)));
   process.on('unhandledRejection', (e) => log.error('unhandled rejection: ' + (e && (e.stack || e.message))));
+  // "Stops responding" means the event loop was blocked. Log every stall so manager.log shows when and how long.
+  let lagAt = Date.now();
+  const lagTimer = setInterval(() => {
+    const now = Date.now();
+    const lag = now - lagAt - 1000;
+    lagAt = now;
+    if (lag > 2000) log.warn(`event loop blocked for ${Math.round(lag / 1000)}s`);
+  }, 1000);
+  if (lagTimer.unref) lagTimer.unref();
 }
 
 main().catch((e) => {

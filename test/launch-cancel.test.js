@@ -76,12 +76,12 @@ test('stop: an account held by stop is not relaunched after a sign-in refusal', 
   assert.equal(launches, 0);
 });
 
-test('sign-in refusals retry at most twice per account in 10 minutes', async () => {
+test('sign-in refusals retry at most once per account in 30 minutes', async () => {
   const launcher = setup(1);
   let launches = 0;
   launcher.launch = async () => { launches++; return { pid: 1 }; };
   launcher.kill = async () => 1;
   launcher.authRetryDelayMs = 0;
   for (let i = 0; i < 4; i++) await launcher.retryAuth({ pid: 10 + i, accountId: 'acc0', target });
-  assert.equal(launches, 2);
+  assert.equal(launches, 1);
 });

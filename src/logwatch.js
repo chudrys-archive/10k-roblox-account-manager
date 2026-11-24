@@ -158,9 +158,10 @@ class LogWatcher extends EventEmitter {
       this.emit('verification', inst, line.slice(0, 300));
       return;
     }
-    m = line.match(/Disconnection Notification\. Reason: (\d+)|Sending disconnect with reason: (\d+)/);
+    // Idle kicks (278) never print "Disconnection Notification"; the replicator records the reason first.
+    m = line.match(/Disconnection Notification\. Reason: (\d+)|Sending disconnect with reason: (\d+)|Client:Disconnect setting replicator disconnect reason to (\d+)/);
     if (m || /\[FLog::Network\] Connection lost/.test(line)) {
-      const code = m ? Number(m[1] || m[2]) : (s.code || 0);
+      const code = m ? Number(m[1] || m[2] || m[3]) : (s.code || 0);
       if (!s.disconnectedAt) s.disconnectedAt = Date.now();
       if (code && (!s.code || s.code === 285)) s.code = code; // keep the most meaningful code
       s.inGame = false;

@@ -29,6 +29,7 @@ test('a captcha pauses automatic launches for everyone, but not the person\'s ow
   assert.equal(g.trip(acc, 'again'), false, 'only the pause that starts returns true (one alert)');
   assert.equal(g.blocks('keep-alive'), true);
   assert.equal(g.blocks('api'), true);
+  assert.equal(g.blocks('sign-in retry'), true);
   assert.equal(g.blocks('manual'), false);
   assert.equal(g.blocks('restart'), false);
   assert.equal(g.publicView().account, 'alt1');

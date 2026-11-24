@@ -21,6 +21,23 @@ function rejoinDelay(s, w, now = Date.now(), rand = Math.random) {
   return Math.round(delay * (0.85 + rand() * 0.4));
 }
 
+const BURST_WINDOW_MS = 60e3;   // exits this close together count as one burst
+const BURST_SIZE = 3;
+const BURST_SPREAD_MS = 90e3;   // a burst's relaunches are spread over this much extra time
+
+/**
+ * Roblox tears every waiting client down together when one client closes, so several accounts exit in
+ * the same few seconds and would all relaunch in the same few seconds: a sign-in burst. During a burst,
+ * each relaunch gets a random extra delay so they don't land on Roblox at once. Returns the updated
+ * exit times and the extra delay for this exit (0 outside a burst).
+ */
+function exitBurst(times, now = Date.now(), rand = Math.random) {
+  const recent = times.filter((t) => now - t < BURST_WINDOW_MS);
+  recent.push(now);
+  const burst = recent.length >= BURST_SIZE;
+  return { times: recent, extraMs: burst ? Math.round(rand() * BURST_SPREAD_MS) : 0 };
+}
+
 const PRESENCE = { 0: 'Offline', 1: 'Online (not in game)', 2: 'In game', 3: 'In Studio', 4: 'Invisible' };
 
 /**
@@ -117,10 +134,17 @@ class Watchdog extends EventEmitter {
       if (acc && acc.keepAlive.enabled && !inst.killReason) {
         this.alerts.send('crash', `${acc.username}: client closed`, 'The Roblox client exited unexpectedly (crash or closed window). Keep-alive is relaunching it.', { key: acc.id });
       }
+      // exits the person did not ask for count toward a burst; a restart we did ourselves does not
+      let extraMs = 0;
+      if (!inst.killReason) {
+        const b = exitBurst(this.exitTimes || []);
+        this.exitTimes = b.times;
+        extraMs = b.extraMs;
+      }
       if (!acc || !acc.keepAlive.enabled) return;
       const s = this.st(inst.accountId);
       const w = this.settings.get('watchdog');
-      if (!s.nextAttemptAt || s.nextAttemptAt < Date.now()) s.nextAttemptAt = Date.now() + rejoinDelay(s, w);
+      if (!s.nextAttemptAt || s.nextAttemptAt < Date.now()) s.nextAttemptAt = Date.now() + rejoinDelay(s, w) + extraMs;
       s.msg = `client exited${inst.killReason ? ` (${inst.killReason})` : ''}; relaunching`;
     });
   }
@@ -301,4 +325,4 @@ class Watchdog extends EventEmitter {
   stop() { clearTimeout(this.timer); }
 }
 
-module.exports = { Watchdog, rejoinDelay };
+module.exports = { Watchdog, rejoinDelay, exitBurst };
