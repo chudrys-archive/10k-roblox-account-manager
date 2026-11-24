@@ -251,6 +251,13 @@ class Watchdog extends EventEmitter {
           this.setStatus(s, 'paused', 'Captcha guard: automation paused');
           return;
         }
+        if (e && e.commitShort) {
+          // Windows has no commit headroom for another client yet. Try again in a minute; not a failure, no alert.
+          s.nextAttemptAt = Date.now() + 60e3; s.launches.pop();
+          s.msg = 'waiting for free memory';
+          this.setStatus(s, 'waiting', s.msg);
+          return;
+        }
         if (e && e.verification) {
           // Don't keep asking: every attempt makes Roblox more suspicious. The person completes it.
           s.nextAttemptAt = Date.now() + VERIFY_PAUSE_MS;

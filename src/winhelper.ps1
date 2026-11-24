@@ -270,6 +270,16 @@ function Disable-Multi {
   return @{ mutex = 'released'; event = 'released' }
 }
 
+# Commit charge. Windows fails allocations (error 1455) once commit reaches the limit (RAM + page file).
+# FreeVirtualMemory is the headroom left under that limit, in KB.
+function Get-CommitState {
+  $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
+  return @{
+    limitBytes = [int64]$os.TotalVirtualMemorySize * 1024
+    freeBytes  = [int64]$os.FreeVirtualMemory * 1024
+  }
+}
+
 function Get-RobloxProcs {
   $list = New-Object System.Collections.ArrayList
   $cim = @(Get-CimInstance -ClassName Win32_Process -Filter "Name='RobloxPlayerBeta.exe'" -ErrorAction SilentlyContinue)
@@ -333,6 +343,7 @@ while ($true) {
       'multi_on'  { $r = Enable-Multi }
       'multi_off' { $r = Disable-Multi }
       'procs'     { $r = Get-RobloxProcs }
+      'memory'    { $r = Get-CommitState }
       'kill'      {
         $killed = 0
         foreach ($x in @($a.pids)) { try { Stop-Process -Id ([int]$x) -Force -ErrorAction Stop; $killed++ } catch { } }

@@ -12,6 +12,10 @@ const log = logger('launcher');
 const INSTANCES_FILE = path.join(DATA, 'instances.json');
 const LOCK_STATUS = path.join(DATA, 'lockholder.json');
 const LOCK_STOP = path.join(DATA, 'lockholder.stop');
+// A client holds about 8-9.2 GB of commit (measured with 9 clients on 7.1.4). Starting another one when
+// less than this is free makes Windows fail allocations (error 1455) and kills clients that are running.
+const COMMIT_RESERVE_BYTES = 10 * 1024 ** 3;
+const GB = 1024 ** 3;
 
 // Roblox keeps the last session's cookie in LocalStorage\RobloxCookies.dat and rewrites it on every start and exit.
 // A client that starts with another account's cookie in that file can have its ticket redeem refused (403).
@@ -573,6 +577,20 @@ class Launcher extends EventEmitter {
    * accounts moderated, so this never lets a second client start. A client that is closing gets a short wait;
    * if one is still running after that, the launch is refused. If the process list can't be read, it is refused too.
    */
+  /**
+   * Refuses to start a client when Windows has less than COMMIT_RESERVE_BYTES of commit headroom.
+   * The watchdog treats a refusal as "wait", not a failed launch. If the reading is unavailable
+   * (helper down), the launch goes ahead as before.
+   */
+  async commitGate(name) {
+    let m = null;
+    try { m = this.helper.memory ? await this.helper.memory() : null; } catch (e) { log.debug('commit check skipped: ' + e.message); return; }
+    if (!m || !(m.freeBytes >= 0)) return;
+    log.info(`commit headroom ${(m.freeBytes / GB).toFixed(1)} GB before launching ${name}`);
+    if (m.freeBytes >= COMMIT_RESERVE_BYTES) return;
+    throw Object.assign(new Error(`${name}: not enough free commit memory to start another client (${(m.freeBytes / GB).toFixed(1)} GB free, need ${COMMIT_RESERVE_BYTES / GB} GB). Waiting for a client to close.`), { commitShort: true });
+  }
+
   async assertNoOtherClient() {
     const deadline = Date.now() + (this.clientWaitMs ?? 15000);
     for (;;) {
@@ -700,6 +718,7 @@ class Launcher extends EventEmitter {
     } else {
       await this.assertNoOtherClient();
     }
+    await this.commitGate(name);
     // Read the process list before minting the ticket, not between minting and launching: a slow helper
     // call in between would leave the ticket stale by the time the client redeems it.
     const before = new Set((await this.helper.procs()).map((p) => p.pid));

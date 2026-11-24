@@ -102,6 +102,11 @@ class WinHelper extends EventEmitter {
     return Array.isArray(r) ? r : (r ? [r] : []);
   }
 
+  /** { limitBytes, freeBytes }: commit limit and the headroom left under it. */
+  memory() {
+    return this.call('memory', {}, 10000);
+  }
+
   /** Ends the helper process. Resolves once it has exited (it is killed after 1.5 s). */
   stop() {
     this.stopping = true;
