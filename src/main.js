@@ -211,6 +211,20 @@ const ctx = { settings, vault, accounts, launcher, watchdog, browser, antiAfk, a
     if (lag > 2000) log.warn(`event loop blocked for ${Math.round(lag / 1000)}s`);
   }, 1000);
   if (lagTimer.unref) lagTimer.unref();
+  // Private commit per client every 5 minutes. Shows whether each client keeps growing or levels off.
+  const commitTimer = setInterval(async () => {
+    try {
+      const procs = await launcher.helper.procs();
+      if (!procs.length) return;
+      const parts = procs.map((p) => {
+        const inst = [...launcher.instances.values()].find((i) => i.pid === p.pid);
+        const acc = inst && accounts.get(inst.accountId);
+        return `${acc ? acc.username : 'pid ' + p.pid} ${p.privMB} MB`;
+      });
+      log.info(`private commit per client: ${parts.join(', ')}`);
+    } catch (e) { log.debug('commit sample: ' + e.message); }
+  }, 5 * 60e3);
+  if (commitTimer.unref) commitTimer.unref();
 }
 
 main().catch((e) => {
