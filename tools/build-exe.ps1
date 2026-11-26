@@ -53,6 +53,15 @@ try {
         $inputs += $publicFiles | ForEach-Object { @{ Path = $_.FullName; Entry = "public/$($_.Name)" } }
 $extFiles = Get-ChildItem -LiteralPath (Join-Path $root 'tools\chrome-extension') -File
 $inputs += $extFiles | ForEach-Object { @{ Path = $_.FullName; Entry = "extension/$($_.Name)" } }
+        # the manager's own sign-in / app window (bin\window + the sources it rebuilds from); without these the exe falls back to Chrome
+        foreach ($n in 'AppWindow.cs', 'LoginWindow.cs', 'app-window.manifest', 'build-window.ps1') {
+            $inputs += @{ Path = (Join-Path $PSScriptRoot $n); Entry = "tools/$n" }
+        }
+        $inputs += Get-ChildItem -LiteralPath $wv2Dir -File -Filter *.dll | ForEach-Object { @{ Path = $_.FullName; Entry = "tools/webview2/$($_.Name)" } }
+        $winBin = Join-Path $root 'bin\window'
+        if (Test-Path -LiteralPath (Join-Path $winBin '10k-window.exe')) {
+            $inputs += Get-ChildItem -LiteralPath $winBin -File | Where-Object Extension -In '.exe', '.dll' | ForEach-Object { @{ Path = $_.FullName; Entry = "bin/window/$($_.Name)" } }
+        }
         foreach ($inputFile in $inputs) {
             [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
                 $archive, $inputFile.Path, $inputFile.Entry, 'Optimal') | Out-Null
