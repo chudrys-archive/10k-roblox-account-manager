@@ -4,7 +4,7 @@ A from-scratch, zero-dependency Roblox multi-account manager for Windows. It's a
 
 ## Run
 
-On Windows x64, download and double-click the `Isa-Roblox-Account-Manager-*-win-x64.exe` release asset. The executable includes Node.js. It keeps your saved data in `%LOCALAPPDATA%\IsaRobloxAccountManager\data`.
+On Windows x64, download and double-click the `10k-Account-Manager-*-win-x64.exe` release asset. The executable includes Node.js. It keeps your saved data in `%LOCALAPPDATA%\IsaRobloxAccountManager\data`.
 
 To move existing accounts from the source version, quit both versions and copy `accounts.vault` from the project's `data` folder into the executable's data folder before adding new accounts there. A Windows-protected vault needs the original Windows account on the same PC. Keep a private backup of the original vault.
 
@@ -36,6 +36,15 @@ With x64 Node.js 22 or later installed, run `./tools/build-exe.ps1` from PowerSh
 | **Runs in the background** | `Start Manager.vbs` / the desktop shortcut (Settings → App) start it with no console window. Quit from the sidebar. Optional start with Windows. Quitting stops every background process the manager started: `node.exe`, the window helper and the multi-instance lock holder. The lock holder is the one exception while Roblox clients are still open, because without it they would close each other; it exits by itself after the last one closes. Ending the `.exe` in Task Manager also ends its `node.exe`. Quitting or crashing never closes your Roblox clients unless you ask it to. |
 | **Restart / Rejoin / Server hop** | Restart relaunches into the same server (no keep-alive needed). Rejoin (launch with an empty target) sends each account back to its last game. Server hop moves an account to a different open server (or the emptiest one), and keep-alive follows it. |
 | **Performance** | Set client CPU priority (Normal / Below normal / Idle). Periodic memory trim (in testing, 3 clients went from 3.9 GB to 0.5 GB of working memory). FPS cap. All apply live to running clients. |
+| **Performance presets** | Settings > Performance preset applies FPS, graphics, window size, CPU priority, memory trim, CPU cap and minimized-window handling in one click: Max alts, Balanced, or Roblox defaults. Each card shows how many settings it would change. Values are starting points, not measured recommendations; use Experiments to compare them on your PC. |
+| **CPU cap** | Optional hard cap per background client (a Windows job object, 3 to 20 percent of the whole PC). The client in front and clients still loading are left alone and a cap is lifted when a client comes to the front. The Clients page shows each client's CPU use and a "cap N%" tag. |
+| **Main account** | Mark the account you play yourself (right-click > Mark as Main account). It is left out of select-all, and Close all, the close hotkey, the run-window end and scheduled restarts leave its client running (Settings > Close all leaves my Main account running). |
+| **Per-account performance** | Account details can override FPS cap, graphics quality and window size for one account; the override is written before that account launches. |
+| **Share profiles** | Launch profiles (Experiments page) can be copied as a short `IRAM1:` code and imported on another install. Codes hold only whitelisted run settings, never cookies or webhooks. |
+| **Scheduled login check** | Settings > Re-check logins every 6, 12 or 24 hours validates every account in the background; a dead cookie triggers the usual "login expired" alert. Off by default. |
+| **Closed by hand** | A client you close yourself exits with code 0 and is shown as "closed by hand", not as a crash. Keep-alive still relaunches it. |
+| **Groups** | Right-click a group chip on the Accounts page to launch, stop, keep-alive or select the whole group. |
+| **Appearance and shortcuts** | Accent colours and a Reduce animations switch (Settings > Appearance, saved per window). Press `?` for the keyboard shortcuts sheet. |
 | **Favorites** | Save games and servers with name and icon; launch the selection into one with a single click. |
 | **UI** | Stats overview, live countdowns, right-click menu on accounts, floating action bar for the selection, drag-to-reorder, group filter chips, and shortcuts: Ctrl+A select all, Enter launch, Del remove, Esc clear, Ctrl+F search. |
 | **Process tracking** | Every launch gets a unique browser-tracker ID. The manager reads it back from the process command line, so each PID maps to its account exactly. This survives manager restarts, because running clients are re-adopted. |

@@ -50,7 +50,7 @@ class UpdateChecker {
     const current = this.info.current;
     try {
       const res = await this.fetch(LATEST_URL, {
-        headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'isa-roblox-account-manager' },
+        headers: { Accept: 'application/vnd.github+json', 'User-Agent': '10k-account-manager' },
         signal: AbortSignal.timeout(8000),
       });
       if (!res.ok) throw new Error(`GitHub answered HTTP ${res.status}`);

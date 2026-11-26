@@ -1,4 +1,4 @@
-# Multi-instance lock holder for Isa's Roblox Account Manager.
+# Multi-instance lock holder for 10k's Account Manager.
 #
 # Roblox clients keep polling the ROBLOX_singletonMutex. Whoever owns it is "the" client and the
 # others get told to close. This process owns the mutex so no client ever can. It runs detached

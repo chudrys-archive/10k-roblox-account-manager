@@ -2,6 +2,7 @@
 const EventEmitter = require('events');
 const { api, RobloxError } = require('./roblox');
 const { logger, uuid, pool, extractCookie } = require('./util');
+const { sanitizePerf } = require('./perf');
 
 const log = logger('accounts');
 
@@ -26,6 +27,8 @@ function normalize(a) {
     cookieUpdatedAt: a.cookieUpdatedAt || Date.now(),
     order: a.order ?? 0,
     keepAlive: { enabled: false, input: '', jobId: '', target: null, ...(a.keepAlive || {}) },
+    main: !!a.main,                    // the account you play yourself: left out of select-all and batch launches
+    perf: sanitizePerf(a.perf),        // per-account FPS / graphics / window size, overriding the global settings
     lastTarget: a.lastTarget || null,
     fields: a.fields || {},
   };
@@ -159,6 +162,8 @@ class AccountStore extends EventEmitter {
     const acc = this.get(id);
     if (!acc) throw new Error('account not found');
     for (const k of ['alias', 'description', 'group', 'password']) if (patch[k] !== undefined) acc[k] = String(patch[k]).slice(0, 2000);
+    if (patch.main !== undefined) acc.main = !!patch.main;
+    if (patch.perf !== undefined) acc.perf = sanitizePerf(patch.perf);
     if (patch.fields && typeof patch.fields === 'object') acc.fields = { ...acc.fields, ...patch.fields };
     if (patch.keepAlive) acc.keepAlive = { ...acc.keepAlive, ...patch.keepAlive };
     if (patch.cookie) {

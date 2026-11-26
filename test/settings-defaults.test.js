@@ -55,3 +55,33 @@ test('a fresh install starts on the safe defaults', () => {
   assert.equal(d.onAlreadyRunning, 'skip');
   assert.equal(d.settingsVersion, 2);
 });
+
+test('a fresh install is set up for several clients plus an executor', () => {
+  const d = new Settings().get();
+  assert.equal(d.multiInstance, true);
+  assert.equal(d.onAlreadyRunning, 'skip');   // replacing would also close an executor running in that client
+  assert.equal(d.executor.enabled, true);
+  assert.equal(d.executor.openBeforeClients, true);
+  assert.equal(d.executor.path, '');          // nothing is guessed: the path is filled in once an executor is seen running
+  assert.equal(d.watchdog.killHungAfterSec, 0); // a force-kill would also close the executor
+});
+
+test('a fresh install runs clients small, slow and plain for idle use', () => {
+  fs.rmSync(FILE, { force: true });
+  const d = new Settings().get();
+  assert.equal(d.fastProfile, 'lowest');
+  assert.equal(d.fpsCap, 15);
+  assert.equal(d.graphicsLevel, 1);
+  assert.equal(d.windowWidth, 320);
+  assert.equal(d.windowHeight, 240);
+});
+
+test('a window size below Roblox\'s own minimum is kept, but only down to the manager\'s floor and only as a pair', () => {
+  const s = new Settings();
+  s.update({ windowWidth: 200, windowHeight: 150 });
+  assert.equal(s.get('windowWidth'), 200);
+  s.update({ windowWidth: 100, windowHeight: 150 });
+  assert.deepEqual([s.get('windowWidth'), s.get('windowHeight')], [0, 0]);
+  s.update({ windowWidth: 320, windowHeight: 0 });
+  assert.deepEqual([s.get('windowWidth'), s.get('windowHeight')], [0, 0]);
+});

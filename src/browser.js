@@ -5,6 +5,7 @@ const { spawn } = require('child_process');
 const EventEmitter = require('events');
 const { DATA, logger, sleep, rmrf, uuid } = require('./util');
 const { api } = require('./roblox');
+const appWindow = require('./appwindow');
 const log = logger('browser');
 
 /** Minimal Chrome DevTools Protocol client over Node's built-in WebSocket. Used only for the check and session windows. */
@@ -147,7 +148,17 @@ class BrowserManager {
     this.accounts = accounts;
     this.capture = capture;
     this.active = new Map(); // jobId -> {kind, label, close}
+    this.lastVia = null;     // how the last login window was opened: 'app' or 'browser'
   }
+
+  /** Where the next login opens: our own sign-in window, or Chrome/Edge with the capture extension. */
+  plannedVia() {
+    if (this.settings.get('loginWindow') === 'browser') return 'browser';
+    return appWindow.hostState() === 'unsupported' ? 'browser' : 'app';
+  }
+
+  /** True when the last login needed the Chrome capture extension (so a missing extension is worth a warning). */
+  needsExtension() { return this.lastVia !== 'app'; }
 
   list() { return [...this.active.entries()].map(([id, v]) => ({ id, kind: v.kind, label: v.label })); }
 
@@ -162,7 +173,21 @@ class BrowserManager {
     wait.catch(() => {});
     this.active.set(id, { kind: 'login', label, close: () => this.capture.cancel('cancelled') });
     try {
-      if (open) openLoginWindow(this.settings, url);
+      this.lastVia = this.plannedVia();
+      if (this.lastVia === 'app') {
+        const child = await appWindow.openLogin({ url, dataDir: DATA, qr, log });
+        const started = Date.now();
+        if (!child) this.lastVia = 'browser';
+        else child.on('exit', (code) => {
+          // the sign-in window never came up (WebView2 runtime missing, bad build): use Chrome/Edge instead
+          if ((code === 2 || code === 3) && Date.now() - started < 15000 && this.capture.armed()) {
+            log.warn('sign-in window exited with code ' + code + ', using the browser instead');
+            this.lastVia = 'browser';
+            if (open) { try { openLoginWindow(this.settings, url); } catch (e) { this.capture.cancel('cancelled'); } }
+          }
+        });
+      }
+      if (this.lastVia === 'browser' && open) openLoginWindow(this.settings, url);
       return await wait;
     } catch (e) {
       this.capture.cancel('cancelled');

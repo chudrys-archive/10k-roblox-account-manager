@@ -24,6 +24,7 @@ function setup() {
   launcher.launch = async (id, target) => { launcher.launches.push(target); launcher.instances.set(100 + launcher.launches.length, { pid: 100 + launcher.launches.length, accountId: id, startedAt: Date.now() - 10 * 60e3 }); return {}; };
   launcher.kill = async (pids, why) => { for (const p of pids) { const i = launcher.instances.get(p); launcher.instances.delete(p); launcher.kills.push(why); if (i) launcher.emit('exit', { ...i, killReason: why }); } };
   const wd = new Watchdog({ launcher, accounts, settings });
+  wd.st('a1').armed = true; // a client of this account was open
   wd.launcher.on('exit', () => {}); // start() not called (no timers); attach exit handler manually
   return { wd, launcher, acc };
 }
@@ -66,6 +67,59 @@ test('respects per-hour relaunch cap and disabled keep-alive', async () => {
   acc.keepAlive.enabled = false;
   await wd.tick();
   assert.equal(s.status, 'off');
+});
+
+test('turning keep-alive on for an account that is not open does not launch it', async () => {
+  const { wd, launcher } = setup();
+  const s = wd.st('a1');
+  s.armed = false;
+  await wd.tick();
+  await new Promise((r) => setImmediate(r));
+  assert.equal(launcher.launches.length, 0, 'nothing is started by itself');
+  assert.equal(s.status, 'idle');
+  assert.equal(s.nextAttemptAt, 0);
+});
+
+test('an account that is launched and then closes is relaunched', async () => {
+  const { wd, launcher } = setup();
+  const s = wd.st('a1');
+  s.armed = false;
+  await wd.tick();
+  assert.equal(launcher.launches.length, 0);
+  // the person launches it: the watchdog sees the client and remembers it was open
+  launcher.instances.set(7, { pid: 7, accountId: 'a1', startedAt: Date.now() - 10 * 60e3 });
+  await wd.tick();
+  assert.equal(s.armed, true);
+  assert.equal(s.status, 'running');
+  // the window closes (crash or closed by hand)
+  launcher.instances.delete(7);
+  await wd.tick();
+  await new Promise((r) => setImmediate(r));
+  assert.equal(launcher.launches.length, 1, 'relaunched once the open client was gone');
+});
+
+test('switching keep-alive off forgets that the account was open', async () => {
+  const { wd, launcher, acc } = setup();
+  const s = wd.st('a1');
+  assert.equal(s.armed, true);
+  acc.keepAlive.enabled = false;
+  await wd.tick();
+  assert.equal(s.armed, false);
+  acc.keepAlive.enabled = true;
+  await wd.tick();
+  await new Promise((r) => setImmediate(r));
+  assert.equal(launcher.launches.length, 0, 'turning it back on does not launch a closed account');
+});
+
+test('with "also start accounts that are not open" on, keep-alive launches them', async () => {
+  const { wd, launcher } = setup();
+  const s = wd.st('a1');
+  s.armed = false;
+  const real = wd.settings;
+  wd.settings = { get: (k) => (k === 'watchdog' ? { ...DEFAULTS.watchdog, startOnEnable: true } : real.get(k)) };
+  await wd.tick();
+  await new Promise((r) => setImmediate(r));
+  assert.equal(launcher.launches.length, 1);
 });
 
 test('invalid cookie never launches', async () => {

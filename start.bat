@@ -1,5 +1,5 @@
 @echo off
-title Isa's Roblox Account Manager
+title 10k's Account Manager
 cd /d "%~dp0"
 where node >nul 2>nul
 if errorlevel 1 (

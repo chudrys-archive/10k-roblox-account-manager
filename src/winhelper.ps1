@@ -1,4 +1,4 @@
-# Persistent Win32 helper for Isa's Roblox Account Manager.
+﻿# Persistent Win32 helper for 10k's Account Manager.
 # Protocol: one JSON request per stdin line -> one JSON response per stdout line.
 #   request:  {"id":1,"cmd":"procs","args":{...}}
 #   response: {"id":1,"ok":true,"result":...}  |  {"id":1,"ok":false,"error":"..."}
@@ -19,6 +19,10 @@ public static class IramWin {
   [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern bool SetWindowTextW(IntPtr h, string s);
   [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowTextW(IntPtr h, StringBuilder sb, int n);
   [DllImport("user32.dll")] public static extern bool MoveWindow(IntPtr h, int x, int y, int w, int ht, bool repaint);
+[DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int w, int ht, uint flags);
+[DllImport("user32.dll")] public static extern bool IsZoomed(IntPtr h);
+[DllImport("user32.dll")] public static extern short GetAsyncKeyState(int vk);
+[DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr ctx);
   [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
   [DllImport("user32.dll")] public static extern bool IsHungAppWindow(IntPtr h);
@@ -82,6 +86,10 @@ public static class IramWin {
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
   [DllImport("user32.dll")] public static extern bool GetLastInputInfo(ref LASTINPUTINFO li);
   [DllImport("psapi.dll")] public static extern bool EmptyWorkingSet(IntPtr hProcess);
+  // ProcessPowerThrottling (class 4): ControlMask 1 = execution speed, StateMask 0 = do not throttle this process (EcoQoS off)
+  [DllImport("kernel32.dll", SetLastError = true)] static extern bool SetProcessInformation(IntPtr h, int cls, ref PowerThrottle info, int size);
+  [StructLayout(LayoutKind.Sequential)] public struct PowerThrottle { public uint Version; public uint ControlMask; public uint StateMask; }
+  public static bool NoPowerThrottle(IntPtr h) { PowerThrottle t = new PowerThrottle(); t.Version = 1; t.ControlMask = 1; t.StateMask = 0; return SetProcessInformation(h, 4, ref t, Marshal.SizeOf(t)); }
 
   public static uint IdleMs() {
     LASTINPUTINFO li = new LASTINPUTINFO(); li.cbSize = (uint)Marshal.SizeOf(li);
@@ -150,6 +158,179 @@ public static class IramWin {
 }
 "@
 
+# Frees the Roblox single-instance lock inside clients that are already running, WITHOUT closing them: the named
+# event/mutex handle is closed in the client (DuplicateHandle with DUPLICATE_CLOSE_SOURCE, the Process Explorer
+# method). Only Event and Mutant handles in the pids we are given are inspected, and only a name that ends exactly
+# in the wanted suffix at a '\' boundary is closed. Nothing here ever throws into the caller: failures return empty.
+Add-Type -TypeDefinition @"
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+public static class IramSingleton {
+  [DllImport("ntdll.dll")] static extern int NtQuerySystemInformation(int cls, IntPtr buf, int len, out int ret);
+  [DllImport("ntdll.dll")] static extern int NtQueryObject(IntPtr h, int cls, IntPtr buf, int len, out int ret);
+  [DllImport("kernel32.dll", SetLastError = true)] static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
+  [DllImport("kernel32.dll", SetLastError = true)] static extern bool DuplicateHandle(IntPtr sp, IntPtr sh, IntPtr tp, out IntPtr th, uint access, bool inherit, uint options);
+  [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
+  [DllImport("kernel32.dll")] static extern IntPtr GetCurrentProcess();
+  [DllImport("kernel32.dll")] static extern int GetCurrentProcessId();
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern IntPtr CreateEventW(IntPtr a, bool manual, bool init, string name);
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern IntPtr CreateMutexW(IntPtr a, bool owner, string name);
+  const int SystemExtendedHandleInformation = 0x40;
+  const int ObjectNameInformation = 1;
+  const int STATUS_INFO_LENGTH_MISMATCH = unchecked((int)0xC0000004);
+  const long MaxSnapshot = 256L * 1024 * 1024;
+  const uint PROCESS_DUP_HANDLE = 0x40;
+  const uint DUPLICATE_CLOSE_SOURCE = 1, DUPLICATE_SAME_ACCESS = 2;
+  const int EntrySize = 40, EntriesOffset = 16;
+
+  static IntPtr Snapshot(out long bytes) {
+    int size = 1 << 20; bytes = 0;
+    while (size <= MaxSnapshot) {
+      IntPtr buf = Marshal.AllocHGlobal(size);
+      int ret; int st = NtQuerySystemInformation(SystemExtendedHandleInformation, buf, size, out ret);
+      if (st == 0) { bytes = size; return buf; }
+      Marshal.FreeHGlobal(buf);
+      if (st != STATUS_INFO_LENGTH_MISMATCH) return IntPtr.Zero;
+      size = Math.Max(size * 2, ret + (1 << 16));
+    }
+    return IntPtr.Zero;
+  }
+
+  public static bool NameMatches(string name, string suffix) {
+    if (string.IsNullOrEmpty(name) || string.IsNullOrEmpty(suffix) || name.Length < suffix.Length) return false;
+    if (!name.EndsWith(suffix, StringComparison.OrdinalIgnoreCase)) return false;
+    int split = name.Length - suffix.Length;
+    return split == 0 || name[split - 1] == '\\';
+  }
+
+  static string ObjectName(IntPtr h) {
+    IntPtr buf = Marshal.AllocHGlobal(4096);
+    try {
+      int ret; if (NtQueryObject(h, ObjectNameInformation, buf, 4096, out ret) != 0) return null;
+      int len = Marshal.ReadInt16(buf, 0); IntPtr str = Marshal.ReadIntPtr(buf, 8);
+      if (len <= 0 || str == IntPtr.Zero) return null;
+      return Marshal.PtrToStringUni(str, len / 2);
+    } finally { Marshal.FreeHGlobal(buf); }
+  }
+
+  // Returns "pid:name" for every handle closed.
+  public static string[] Release(int[] pids, string[] suffixes) {
+    var closed = new List<string>();
+    if (!Environment.Is64BitProcess || pids == null || pids.Length == 0 || suffixes == null) return closed.ToArray();
+    var want = new HashSet<int>(pids);
+    IntPtr own1 = CreateEventW(IntPtr.Zero, true, false, null), own2 = CreateMutexW(IntPtr.Zero, false, null);
+    long bytes; IntPtr snap = Snapshot(out bytes);
+    try {
+      if (snap == IntPtr.Zero || own1 == IntPtr.Zero || own2 == IntPtr.Zero) return closed.ToArray();
+      long count = Marshal.ReadInt64(snap, 0);
+      if (count < 0 || EntriesOffset + count * EntrySize > bytes) return closed.ToArray();
+      int me = GetCurrentProcessId(); int evType = -1, muType = -1;
+      for (long i = 0; i < count; i++) {
+        IntPtr e = snap + (int)(EntriesOffset + i * EntrySize);
+        if ((long)Marshal.ReadIntPtr(e, 8) != me) continue;
+        long hv = (long)Marshal.ReadIntPtr(e, 16); int ty = Marshal.ReadInt16(e, 28);
+        if (hv == (long)own1) evType = ty; else if (hv == (long)own2) muType = ty;
+      }
+      if (evType < 0 || muType < 0) return closed.ToArray();
+      var procs = new Dictionary<int, IntPtr>();
+      try {
+        for (long i = 0; i < count; i++) {
+          IntPtr e = snap + (int)(EntriesOffset + i * EntrySize);
+          int pid = (int)(long)Marshal.ReadIntPtr(e, 8);
+          if (!want.Contains(pid)) continue;
+          int ty = Marshal.ReadInt16(e, 28);
+          if (ty != evType && ty != muType) continue;
+          IntPtr ph; if (!procs.TryGetValue(pid, out ph)) { ph = OpenProcess(PROCESS_DUP_HANDLE, false, pid); procs[pid] = ph; }
+          if (ph == IntPtr.Zero) continue;
+          IntPtr hv = Marshal.ReadIntPtr(e, 16), local;
+          if (!DuplicateHandle(ph, hv, GetCurrentProcess(), out local, 0, false, DUPLICATE_SAME_ACCESS)) continue;
+          string name = null; try { name = ObjectName(local); } finally { CloseHandle(local); }
+          string hit = null; foreach (var s in suffixes) if (NameMatches(name, s)) { hit = s; break; }
+          if (hit == null) continue;
+          IntPtr gone; if (DuplicateHandle(ph, hv, GetCurrentProcess(), out gone, 0, false, DUPLICATE_CLOSE_SOURCE)) { CloseHandle(gone); closed.Add(pid + ":" + hit); }
+        }
+      } finally { foreach (var p in procs.Values) if (p != IntPtr.Zero) CloseHandle(p); }
+    } finally { if (snap != IntPtr.Zero) Marshal.FreeHGlobal(snap); if (own1 != IntPtr.Zero) CloseHandle(own1); if (own2 != IntPtr.Zero) CloseHandle(own2); }
+    return closed.ToArray();
+  }
+}
+"@
+
+function Release-Singleton($a) {
+  $pids = @($a.pids | ForEach-Object { [int]$_ })
+  $names = @($a.names | ForEach-Object { [string]$_ })
+  if ($names.Count -eq 0) { $names = @('ROBLOX_singletonEvent') } # a mutex's owner stays recorded after its handle is closed, so closing it frees nothing
+  return , @([IramSingleton]::Release([int[]]$pids, [string[]]$names))
+}
+# Exit codes of Roblox clients: a handle opened while the client runs still answers after it ends, so the manager can tell a clean exit (window closed by hand) from a crash.
+Add-Type -TypeDefinition @"
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+public static class IramExit {
+  [DllImport("kernel32.dll", SetLastError = true)] static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
+  [DllImport("kernel32.dll")] static extern bool GetExitCodeProcess(IntPtr h, out uint code);
+  [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
+  static readonly Dictionary<int, IntPtr> handles = new Dictionary<int, IntPtr>();
+  public static int Watch(int[] pids) {
+    int n = 0;
+    lock (handles) foreach (int pid in pids) {
+      if (handles.ContainsKey(pid)) continue;
+      IntPtr h = OpenProcess(0x1000, false, pid); // PROCESS_QUERY_LIMITED_INFORMATION
+      if (h != IntPtr.Zero) { handles[pid] = h; n++; }
+    }
+    return n;
+  }
+  // -1 = not watched, -2 = still running, otherwise the exit code. A finished process is released.
+  public static long Take(int pid) {
+    lock (handles) {
+      IntPtr h; if (!handles.TryGetValue(pid, out h)) return -1;
+      uint code; if (!GetExitCodeProcess(h, out code)) return -1;
+      if (code == 259) return -2; // STILL_ACTIVE (the handle has no SYNCHRONIZE right, so the exit code is the only signal)
+      CloseHandle(h); handles.Remove(pid);
+      return (long)code;
+    }
+  }
+  public static void Release(int pid) { lock (handles) { IntPtr h; if (handles.TryGetValue(pid, out h)) { CloseHandle(h); handles.Remove(pid); } } }
+}
+"@
+# CPU cap per client: a job object with a hard CPU-rate limit. A process can join one job and keep it until it ends; changing the rate changes the cap.
+Add-Type -TypeDefinition @"
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+public static class IramJob {
+  [DllImport("kernel32.dll", SetLastError = true)] static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern IntPtr CreateJobObjectW(IntPtr attrs, string name);
+  [DllImport("kernel32.dll", SetLastError = true)] static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+  [DllImport("kernel32.dll", SetLastError = true)] static extern bool SetInformationJobObject(IntPtr job, int infoClass, ref CpuRate info, int size);
+  [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
+  [StructLayout(LayoutKind.Sequential)] struct CpuRate { public uint ControlFlags; public uint Rate; }
+  static readonly Dictionary<int, IntPtr> jobs = new Dictionary<int, IntPtr>();
+  // pct = share of the whole machine (1..100); 0 lifts the cap (100%). Returns false when the process could not be put in a job.
+  public static bool Cap(int pid, int pct) {
+    lock (jobs) {
+      IntPtr job;
+      if (!jobs.TryGetValue(pid, out job)) {
+        if (pct <= 0) return true; // never capped, nothing to lift
+        IntPtr proc = OpenProcess(0x0100 | 0x0001, false, pid); // PROCESS_SET_QUOTA | PROCESS_TERMINATE
+        if (proc == IntPtr.Zero) return false;
+        try {
+          job = CreateJobObjectW(IntPtr.Zero, null);
+          if (job == IntPtr.Zero) return false;
+          if (!AssignProcessToJobObject(job, proc)) { CloseHandle(job); return false; }
+        } finally { CloseHandle(proc); }
+        jobs[pid] = job;
+      }
+      CpuRate info; info.ControlFlags = 0x1 | 0x4; // ENABLE | HARD_CAP
+      info.Rate = (uint)(pct <= 0 ? 10000 : Math.Min(100, pct) * 100);
+      return SetInformationJobObject(job, 15, ref info, Marshal.SizeOf(typeof(CpuRate)));
+    }
+  }
+  public static void Release(int pid) { lock (jobs) { IntPtr j; if (jobs.TryGetValue(pid, out j)) { CloseHandle(j); jobs.Remove(pid); } } }
+}
+"@
 # Per-process audio mute through Windows Core Audio (the same thing the Volume Mixer does).
 $script:AudioOk = $true
 try {
@@ -280,37 +461,100 @@ function Get-CommitState {
   }
 }
 
+# The command line and start time of a process never change, so they are read once (WMI is the slow part) and kept per pid + start time.
+$script:ProcInfo = @{}
 function Get-RobloxProcs {
   $list = New-Object System.Collections.ArrayList
-  $cim = @(Get-CimInstance -ClassName Win32_Process -Filter "Name='RobloxPlayerBeta.exe'" -ErrorAction SilentlyContinue)
-  $wins = [IramWin]::MainWindows([uint32[]]@($cim | ForEach-Object { [uint32]$_.ProcessId }))
-  foreach ($c in $cim) {
-    $procId = [int]$c.ProcessId
-    $cl = [string]$c.CommandLine
-    $btid = $null
-    if ($cl -match 'browsertrackerid:(\d+)') { $btid = $Matches[1] }
-    elseif ($cl -match '(?:^|\s)-b\s+(\d+)') { $btid = $Matches[1] }
-    $p = $null
-    try { $p = Get-Process -Id $procId -ErrorAction Stop } catch { continue }
-    $h = [IntPtr]::Zero
-    if ($wins.ContainsKey([uint32]$procId)) { $h = $wins[[uint32]$procId] }
-    $hung = $false; $title = ''; $minimized = $false
-    if ($h -ne [IntPtr]::Zero) {
-      $hung = [IramWin]::IsHungAppWindow($h)
-      $title = [IramWin]::GetTitle($h)
-      $minimized = [IramWin]::IsIconic($h)
-    }
-    $start = $null
-    try { $start = $c.CreationDate.ToUniversalTime().ToString('o') } catch { }
-    [void]$list.Add(@{
-      pid = $procId; btid = $btid; hwnd = [int64]$h; title = $title; hung = $hung; minimized = $minimized
-      memMB = [math]::Round($p.WorkingSet64 / 1MB); privMB = [math]::Round($p.PrivateMemorySize64 / 1MB); start = $start
-    })
+  $procsNow = @([System.Diagnostics.Process]::GetProcessesByName('RobloxPlayerBeta'))
+  $wins = [IramWin]::MainWindows([uint32[]]@($procsNow | ForEach-Object { [uint32]$_.Id }))
+  $seen = @{}
+  foreach ($p in $procsNow) {
+    try {
+      $procId = [int]$p.Id
+      $st = $null; try { $st = $p.StartTime.ToUniversalTime().ToString('o') } catch { continue }
+      $key = "$procId|$st"
+      $seen[$key] = $true
+      $info = $script:ProcInfo[$key]
+      if ($null -eq $info) {
+        $cl = ''
+        try { $c = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId=$procId" -ErrorAction Stop; $cl = [string]$c.CommandLine } catch { }
+        $btid = $null
+        if ($cl -match 'browsertrackerid:(\d+)') { $btid = $Matches[1] }
+        elseif ($cl -match '(?:^|\s)-b\s+(\d+)') { $btid = $Matches[1] }
+        $info = @{ btid = $btid; start = $st }
+        $script:ProcInfo[$key] = $info
+      }
+      $h = [IntPtr]::Zero
+      if ($wins.ContainsKey([uint32]$procId)) { $h = $wins[[uint32]$procId] }
+      $hung = $false; $title = ''; $minimized = $false
+      if ($h -ne [IntPtr]::Zero) {
+        $hung = [IramWin]::IsHungAppWindow($h)
+        $title = [IramWin]::GetTitle($h)
+        $minimized = [IramWin]::IsIconic($h)
+      }
+      $cpu = $null; try { $cpu = [math]::Round($p.TotalProcessorTime.TotalMilliseconds) } catch { }
+      $p.Refresh()
+      [void]$list.Add(@{
+        pid = $procId; btid = $info.btid; hwnd = [int64]$h; title = $title; hung = $hung; minimized = $minimized
+        memMB = [math]::Round($p.WorkingSet64 / 1MB); privMB = [math]::Round($p.PrivateMemorySize64 / 1MB); start = $info.start
+        cpuMs = $cpu; handles = $p.HandleCount
+      })
+    } catch { } finally { $p.Dispose() }
   }
+  foreach ($k in @($script:ProcInfo.Keys)) { if (-not $seen.ContainsKey($k)) { $script:ProcInfo.Remove($k) } }
   return , $list.ToArray()
 }
 
+# Roblox refuses to be smaller than 800x600 when it is sized the normal way: its window procedure answers WM_GETMINMAXINFO, and
+# SetWindowPos sends WM_WINDOWPOSCHANGING, which applies that minimum. SWP_NOSENDCHANGING skips that message, so the size sticks.
+# Sizes are physical pixels (per-monitor DPI awareness for this call only). A maximized window is left alone (maximize one to look at it),
+# and nothing is resized while the left mouse button is down, so dragging a window is never fought.
+$SWP_NOSIZE = 0x0001; $SWP_NOMOVE = 0x0002; $SWP_NOZORDER = 0x0004; $SWP_NOACTIVATE = 0x0010; $SWP_NOSENDCHANGING = 0x0400
+function Invoke-Resize($a) {
+  $w = [int]$a.width; $hh = [int]$a.height
+  if ($w -lt 1 -or $hh -lt 1) { return 0 }
+  if (([IramWin]::GetAsyncKeyState(0x01) -band 0x8000) -ne 0) { return 0 }
+  $old = [IramWin]::SetThreadDpiAwarenessContext([IntPtr](-4))
+  $n = 0
+  try {
+    foreach ($x in @($a.hwnds)) {
+      $h = [IntPtr][int64]$x
+      if ($h -eq [IntPtr]::Zero) { continue }
+      if (-not [IramWin]::IsWindow($h) -or [IramWin]::IsIconic($h) -or [IramWin]::IsZoomed($h)) { continue }
+      $rc = New-Object IramWin+RECT
+      if (-not [IramWin]::GetWindowRect($h, [ref]$rc)) { continue }
+      if (($rc.R - $rc.L) -eq $w -and ($rc.B - $rc.T) -eq $hh) { continue }
+      if ([IramWin]::SetWindowPos($h, [IntPtr]::Zero, 0, 0, $w, $hh, ($SWP_NOMOVE -bor $SWP_NOZORDER -bor $SWP_NOACTIVATE -bor $SWP_NOSENDCHANGING))) { $n++ }
+    }
+  } finally {
+    if ($old -ne [IntPtr]::Zero) { [void][IramWin]::SetThreadDpiAwarenessContext($old) }
+  }
+  return $n
+}
+
+# Tiles windows of one fixed size (the size set in Settings) in rows; when they do not all fit they overlap a little instead of leaving the screen.
+function Invoke-TileSmall($a) {
+  $hwnds = @($a.hwnds | ForEach-Object { [IntPtr][int64]$_ } | Where-Object { $_ -ne [IntPtr]::Zero })
+  $n = $hwnds.Count
+  if ($n -eq 0) { return 0 }
+  $w = [int]$a.width; $hh = [int]$a.height
+  $wa = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+  $cols = [int]$a.cols
+  if ($cols -le 0) { $cols = [math]::Max(1, [math]::Floor($wa.Width / $w)) }
+  $cols = [math]::Min($cols, $n)
+  $rows = [math]::Ceiling($n / $cols)
+  $stepX = if ($cols -gt 1) { [math]::Max(1, [math]::Min($w, [math]::Floor(($wa.Width - $w) / ($cols - 1)))) } else { 0 }
+  $stepY = if ($rows -gt 1) { [math]::Max(1, [math]::Min($hh, [math]::Floor(($wa.Height - $hh) / ($rows - 1)))) } else { 0 }
+  for ($i = 0; $i -lt $n; $i++) {
+    $col = $i % $cols; $row = [math]::Floor($i / $cols)
+    [void][IramWin]::ShowWindow($hwnds[$i], 9)
+    [void][IramWin]::SetWindowPos($hwnds[$i], [IntPtr]::Zero, $wa.X + $col * $stepX, $wa.Y + $row * $stepY, $w, $hh, ($SWP_NOZORDER -bor $SWP_NOACTIVATE -bor $SWP_NOSENDCHANGING))
+  }
+  return $n
+}
+
 function Invoke-Tile($a) {
+  if ([int]$a.width -gt 0 -and [int]$a.height -gt 0) { return Invoke-TileSmall $a }
   $hwnds = @($a.hwnds | ForEach-Object { [IntPtr][int64]$_ } | Where-Object { $_ -ne [IntPtr]::Zero })
   $n = $hwnds.Count
   if ($n -eq 0) { return 0 }
@@ -343,7 +587,12 @@ while ($true) {
       'multi_on'  { $r = Enable-Multi }
       'multi_off' { $r = Disable-Multi }
       'procs'     { $r = Get-RobloxProcs }
+      'release_singleton' { $r = Release-Singleton $a }
       'memory'    { $r = Get-CommitState }
+      'cpucap'    { $r = @(@($a.items) | ForEach-Object { [IramJob]::Cap([int]$_.pid, [int]$_.pct) }) }
+      'watch'     { $r = [IramExit]::Watch([int[]]@($a.pids | ForEach-Object { [int]$_ })) }
+      'exitcode'  { $r = [IramExit]::Take([int]$a.pid); if ($r -ne -2) { [IramJob]::Release([int]$a.pid) } }
+      'unwatch'   { [IramExit]::Release([int]$a.pid); [IramJob]::Release([int]$a.pid); $r = $true }
       'kill'      {
         $killed = 0
         foreach ($x in @($a.pids)) { try { Stop-Process -Id ([int]$x) -Force -ErrorAction Stop; $killed++ } catch { } }
@@ -351,8 +600,18 @@ while ($true) {
       }
       'settitle'  { $r = [IramWin]::SetWindowTextW([IntPtr][int64]$a.hwnd, [string]$a.title) }
       'show'      { $r = [IramWin]::ShowWindow([IntPtr][int64]$a.hwnd, [int]$a.mode) } # 6=min, 9=restore
+      'park'      {
+        # off-screen but not minimized: restore first, then move far left keeping the size. mode 'back' returns it to (80,80).
+        $h = [IntPtr][int64]$a.hwnd
+        [void][IramWin]::ShowWindow($h, 9)
+        # SWP_NOSIZE: only the position changes, so a window made smaller than Roblox's minimum keeps its size
+        $mv = $SWP_NOSIZE -bor $SWP_NOZORDER -bor $SWP_NOACTIVATE -bor $SWP_NOSENDCHANGING
+        if ([string]$a.mode -eq 'back') { $r = [IramWin]::SetWindowPos($h, [IntPtr]::Zero, 80, 80, 0, 0, $mv) }
+        else { $r = [IramWin]::SetWindowPos($h, [IntPtr]::Zero, -20000, 0, 0, 0, $mv) }
+      }
       'focus'     { $h = [IntPtr][int64]$a.hwnd; [void][IramWin]::ShowWindow($h, 9); $r = [IramWin]::SetForegroundWindow($h) }
       'tile'      { $r = Invoke-Tile $a }
+      'resize'    { $r = Invoke-Resize $a }
       'idle'      { $r = [IramWin]::IdleMs() }
       'foreground' {
         $fg = [IramWin]::GetForegroundWindow(); $fpid = [uint32]0
@@ -375,6 +634,7 @@ while ($true) {
             $p = Get-Process -Id ([int]$x) -ErrorAction Stop
             if ($a.priority) { $p.PriorityClass = [System.Diagnostics.ProcessPriorityClass]([string]$a.priority) }
             if ($a.trim) { [void][IramWin]::EmptyWorkingSet($p.Handle) }
+            if ($a.noThrottle) { [void][IramWin]::NoPowerThrottle($p.Handle) }
             $done++
           } catch { }
         }

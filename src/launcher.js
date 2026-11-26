@@ -2,11 +2,22 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const os = require('os');
 const { spawn, execFileSync } = require('child_process');
 const EventEmitter = require('events');
 const { api, RobloxError } = require('./roblox');
 const { DATA, logger, sleep, atomicWrite, readJson } = require('./util');
-const { buildFlags } = require('./fflags');
+const { buildFlags, setFramerateCap, applyClientSettings } = require('./fflags');
+const { MetricsStore, classifyClient, fleetSummary, trendOf, gateRoom } = require('./metrics');
+const { isActive: scheduleActive } = require('./schedule');
+const { cpuShare } = require('./cpu');
+const { effectivePerf } = require('./perf');
+const { pickTrim, ramIsTight } = require('./trimplan');
+const CORES = Math.max(1, (os.cpus() || []).length);
+const TRIM_NOW_GAP_MS = 3000; // the Free RAM button trims one client at a time, this far apart
+const CPU_CAP_SPARE_LOADING_MS = 90 * 1000; // a client that is still loading needs the CPU to join
+/** Stable for the life of one client (it survives a pid hand-off) and new for every relaunch. */
+const metricsKey = (inst) => `${inst.accountId}:${inst.startedAt}`;
 
 const log = logger('launcher');
 const INSTANCES_FILE = path.join(DATA, 'instances.json');
@@ -18,6 +29,12 @@ const GB = 1024 ** 3;
 const COMMIT_RESERVE_BYTES = 10 * GB;     // keep at least this free before a launch
 const COMMIT_KEEP_FREE_BYTES = 6 * GB;    // never plan clients into the last of the limit
 const COMMIT_PER_CLIENT_BYTES = 8 * GB;   // assumed per client until a running one has been measured
+const LOCK_FREE_COOLDOWN_MS = 10000;      // how often the periodic sync retries freeing the singleton lock
+const SINGLETON_EVENT_NAMES = ['ROBLOX_singletonEvent'];
+// "Close all" takes clients down one at a time with a pause between them; closing many at once is what gets accounts flagged.
+const CLOSE_GAP_MIN_MS = 10000;
+const CLOSE_GAP_MAX_MS = 15000;
+function closeGapMs(rand = Math.random) { return CLOSE_GAP_MIN_MS + Math.floor(rand() * (CLOSE_GAP_MAX_MS - CLOSE_GAP_MIN_MS + 1)); }
 
 // Roblox keeps the last session's cookie in LocalStorage\RobloxCookies.dat and rewrites it on every start and exit.
 // A client that starts with another account's cookie in that file can have its ticket redeem refused (403).
@@ -28,6 +45,20 @@ function clearClientCookies() {
   if (!dir) return;
   try { fs.unlinkSync(path.join(dir, 'LocalStorage', 'RobloxCookies.dat')); }
   catch (e) { if (e.code !== 'ENOENT') log.warn(`could not clear the Roblox cookie store: ${e.message}`); }
+}
+// Roblox's embedded browser (WebView2) keeps its cookies in one shared profile under Roblox\UniversalApp. The page
+// Roblox shows for a join challenge ("Verifying you're not a bot") reads the account from that profile, so a client
+// started right after another account's client opened that account's challenge instead of its own. Every account
+// therefore gets its own WebView2 profile folder, handed to the client through WEBVIEW2_USER_DATA_FOLDER.
+function clientWebviewDir(dataDir, accountId) {
+  const id = String(accountId || '').replace(/[^0-9a-zA-Z_-]/g, '');
+  return id ? path.join(dataDir, 'client-webview', id) : null;
+}
+function clientEnv(dataDir, accountId) {
+  const dir = clientWebviewDir(dataDir, accountId);
+  if (!dir) return process.env;
+  try { fs.mkdirSync(dir, { recursive: true }); } catch (e) { log.warn(`could not create the client browser profile: ${e.message}`); return process.env; }
+  return { ...process.env, WEBVIEW2_USER_DATA_FOLDER: dir };
 }
 const GUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
 
@@ -321,8 +352,12 @@ class Launcher extends EventEmitter {
     this.holds = new Map();  // accountId -> time until keep-alive may not relaunch (set by a cancel)
     this.queued = [];           // accountIds waiting
     this.tombstones = new Map(); // pid -> time we killed it (never re-adopt a dying process)
+    this.trimmedAt = new Map();  // pid -> time of that client's last memory trim (trims are spread out, one client at a time)
     this.multiStatus = null;
     this.lastSync = 0;
+    this.metrics = new MetricsStore(); // private-commit history per client, see metrics.js
+    this.lastMemory = null;            // { freeBytes, limitBytes, at } from the helper, refreshed about every 15 s
+    this.memoryAt = 0;
   }
 
   async init() {
@@ -355,7 +390,7 @@ class Launcher extends EventEmitter {
    * ROBLOX_singletonMutex. It deliberately outlives the manager, so restarting or crashing the
    * manager never makes running clients close each other. Called on every sync (cheap).
    */
-  async applyMulti() {
+  async applyMulti(force = false) {
     const want = !!this.settings.get('multiInstance');
     let s = this.lockStatus();
     if (want) {
@@ -372,6 +407,15 @@ class Launcher extends EventEmitter {
     } else if (s) {
       try { fs.writeFileSync(LOCK_STOP, '1'); } catch {}
     }
+    if (want && s && s.mutex !== 'held' && (force || Date.now() - (this.lastLockFree || 0) > LOCK_FREE_COOLDOWN_MS)) {
+      // A client that started before the holder owns the lock. Free it inside that client instead of asking to close it.
+      this.lastLockFree = Date.now();
+      const freed = await this.freeSingletonLock().catch((e) => { log.warn('could not free the singleton lock: ' + e.message); return 0; });
+      if (freed > 0) {
+        for (let i = 0; i < 10 && s.mutex !== 'held'; i++) { await sleep(1000); s = this.lockStatus() || s; }
+        log.info(`singleton lock freed in ${freed} running client(s) without closing them; lock is now ${s.mutex === 'held' ? 'held by the manager' : 'still owned by a client'}`);
+      }
+    }
     const prev = this.multiStatus;
     const r = want ? { mutex: s ? s.mutex : 'lock holder not running', event: s ? s.event : '' } : { mutex: 'released', event: '' };
     this.multiStatus = { wanted: want, ...r };
@@ -383,6 +427,17 @@ class Launcher extends EventEmitter {
     else log.warn('multi-instance NOT active yet: a Roblox client that was started outside the manager (or before it) owns the singleton lock. Close all Roblox windows once; the manager takes the lock automatically.');
   }
 
+  /**
+   * Closes the single-instance event handle inside every running Roblox client, so a new client does not signal the old
+   * one to quit. The clients keep running. Returns how many handles were closed.
+   */
+  async freeSingletonLock() {
+    const procs = await this.helper.procs().catch(() => []);
+    const pids = procs.map((p) => p.pid).filter((n) => Number.isInteger(n) && n > 0);
+    if (!pids.length) return 0;
+    const closed = await this.helper.call('release_singleton', { pids, names: SINGLETON_EVENT_NAMES }, 30000);
+    return Array.isArray(closed) ? closed.length : 0;
+  }
   persist() {
     // keep only recent btids
     const cutoff = Date.now() - 3 * 864e5;
@@ -393,6 +448,42 @@ class Launcher extends EventEmitter {
         btids: [...this.btids.entries()].slice(-500),
       }));
     } catch (e) { log.warn('persist failed: ' + e.message); }
+  }
+
+  /**
+   * Background CPU cap: every client that is not in front, and is past its loading time, may use at most settings.cpuCapPct of the
+   * whole PC's CPU (a Windows job object with a hard cap). The client in front and loading clients are left alone; a client that
+   * comes to the front, or a cap that is switched off, is released again. Only changes are sent to the helper.
+   */
+  async applyCpuCaps() {
+    const cap = Number(this.settings.get('cpuCapPct')) || 0;
+    const insts = [...this.instances.values()];
+    if (!cap && !insts.some((i) => i.capApplied)) return;
+    let front = 0;
+    if (cap && this.settings.get('cpuCapSpareFront') !== false) {
+      try { front = Number((await this.helper.call('foreground')).pid) || 0; } catch { front = 0; }
+    }
+    const now = Date.now();
+    const changes = [];
+    for (const i of insts) {
+      const want = cap && !i.capFailed && i.pid !== front && now - i.startedAt > CPU_CAP_SPARE_LOADING_MS ? cap : 0;
+      if ((i.capApplied || 0) !== want) changes.push({ inst: i, want });
+    }
+    if (!changes.length) return;
+    const res = await this.helper.call('cpucap', { items: changes.map((c) => ({ pid: c.inst.pid, pct: c.want })) });
+    const results = Array.isArray(res) ? res : [res];
+    changes.forEach((c, idx) => {
+      if (results[idx]) { c.inst.capApplied = c.want; return; }
+      if (c.want > 0) { c.inst.capFailed = true; log.warn(`could not cap CPU for pid ${c.inst.pid} (${this.accounts.get(c.inst.accountId)?.username || c.inst.accountId}); it runs uncapped`); }
+    });
+  }
+
+  /** The Windows exit code of a client that has ended, or null when it was never watched or can't be read. */
+  async takeExitCode(pid) {
+    try {
+      const r = await this.helper.call('exitcode', { pid });
+      return typeof r === 'number' && r >= 0 ? r : null;
+    } catch { return null; }
   }
 
   /** Ignore a process we killed for 120s, but only that process: Windows can hand its pid to a new one. */
@@ -452,6 +543,7 @@ class Launcher extends EventEmitter {
           const heir = inst.btid && !inst.killReason && procs.find((q) => q.btid === inst.btid && q.pid !== pid && !this.instances.has(q.pid) && !this.isTombstoned(q));
           if (heir) {
             this.instances.delete(pid);
+            this.helper.call('unwatch', { pid }).catch(() => {});
             inst.pid = heir.pid;
             inst.tunedPriority = null;
             this.instances.set(heir.pid, inst);
@@ -468,7 +560,8 @@ class Launcher extends EventEmitter {
           }
           this.instances.delete(pid);
           changed = true;
-          log.info(`instance exited: pid ${pid} (${this.accounts.get(inst.accountId)?.username || inst.accountId})`);
+          inst.exitCode = await this.takeExitCode(pid);
+          log.info(`instance exited: pid ${pid} (${this.accounts.get(inst.accountId)?.username || inst.accountId})${inst.killReason ? ` (${inst.killReason})` : inst.exitCode === 0 ? ' (clean exit, closed by hand)' : inst.exitCode != null ? ` (exit code ${inst.exitCode})` : ' (exit code unknown)'}`);
           this.emit('exit', inst);
         }
       }
@@ -493,11 +586,29 @@ class Launcher extends EventEmitter {
           log.info(`adopted pid ${p.pid} for ${this.accounts.get(b.accountId).username}`);
         }
       }
+      // Hold a handle to every client so its exit code can be read once it ends (clean exit = closed by hand).
+      const toWatch = [...this.instances.values()].filter((i) => i.watchedPid !== i.pid);
+      if (toWatch.length) {
+        for (const i of toWatch) i.watchedPid = i.pid;
+        this.helper.call('watch', { pids: toWatch.map((i) => i.pid) }).catch((e) => log.debug('watch: ' + e.message));
+      }
       const rename = this.settings.get('renameWindows');
       for (const inst of this.instances.values()) {
         const p = live.get(inst.pid);
         if (!p) continue; // in post-launch grace window
         inst.hwnd = p.hwnd; inst.memMB = p.memMB; inst.minimized = p.minimized;
+        // the client's RAM a few seconds after a trim is the floor a later trim has to beat (see trimplan.worthTrimming)
+        if (inst.trimPendingAt && Date.now() - inst.trimPendingAt >= 4000 && Number.isFinite(p.memMB)) { inst.trimBaseMB = p.memMB; inst.trimPendingAt = 0; }
+        // A minimized client's memory can grow far faster than an open one; park it off-screen instead (setting minimizedAction)
+        if (p.minimized && p.hwnd && this.settings.get('minimizedAction') === 'park' && !(Date.now() - (inst.parkedAt || 0) < 15000)) {
+          inst.parkedAt = Date.now(); inst.parked = true;
+          this.helper.call('park', { hwnd: p.hwnd, mode: 'off' }).catch(() => {});
+        }
+        inst.privMB = p.privMB;
+        { const c = cpuShare(inst.cpuPrev, p.cpuMs, Date.now(), CORES, inst.cpuPct == null ? null : inst.cpuPct); inst.cpuPrev = c.prev; inst.cpuPct = c.pct; }
+        inst.handles = Number.isFinite(p.handles) ? p.handles : null;
+        if (!(inst.peakPrivMB >= p.privMB)) inst.peakPrivMB = p.privMB;
+        this.metrics.record(metricsKey(inst), p.privMB);
         inst.hung = p.hung;
         inst.hungSince = p.hung ? (inst.hungSince || Date.now()) : null;
         const acc = this.accounts.get(inst.accountId);
@@ -506,14 +617,50 @@ class Launcher extends EventEmitter {
           if (p.title !== want) this.helper.call('settitle', { hwnd: p.hwnd, title: want }).catch(() => {});
         }
       }
+      // Small client windows: Roblox starts at its own minimum (800x600). Every few seconds each client that is not minimized, parked
+      // or maximized is brought to the size set in Settings, which can be far below that minimum (see Invoke-Resize).
+      // An account can override the size (accounts.perf); clients are grouped by the size they should have.
+      if (Date.now() - (this.lastResize || 0) >= 4000) {
+        const glob = { windowWidth: this.settings.get('windowWidth'), windowHeight: this.settings.get('windowHeight') };
+        const bySize = new Map();
+        for (const i of this.instances.values()) {
+          if (!i.hwnd || i.minimized || i.parked) continue;
+          const e = effectivePerf(glob, this.accounts.get(i.accountId)?.perf);
+          if (!(e.windowWidth > 0 && e.windowHeight > 0)) continue;
+          const k = `${e.windowWidth}x${e.windowHeight}`;
+          if (!bySize.has(k)) bySize.set(k, { width: e.windowWidth, height: e.windowHeight, hwnds: [] });
+          bySize.get(k).hwnds.push(i.hwnd);
+        }
+        if (bySize.size) {
+          this.lastResize = Date.now();
+          for (const g of bySize.values()) this.helper.call('resize', g).catch((e) => log.debug('resize: ' + e.message));
+        }
+      }
+      await this.applyCpuCaps().catch((e) => log.debug('cpu cap: ' + e.message));
+      this.metrics.prune(new Set([...this.instances.values()].map(metricsKey)));
       this.unknown = procs.filter((p) => !this.instances.has(p.pid)).map((p) => ({ pid: p.pid, title: p.title, memMB: p.memMB, hwnd: p.hwnd }));
       // resource tuning: priority (re-applied if the setting changes) + periodic memory trim
       for (const inst of this.instances.values()) this.tuneInstance(inst);
       await this.applyAudio().catch((e) => log.debug('audio: ' + e.message));
       const trimMin = this.settings.get('trimMemoryMin');
-      if (trimMin && Date.now() - (this.lastTrim || 0) > trimMin * 60000 && this.instances.size) {
-        this.lastTrim = Date.now();
-        this.helper.call('tune', { pids: [...this.instances.keys()], trim: true }).then((n) => log.info(`trimmed memory of ${n} client(s)`), () => {});
+      if (trimMin && this.instances.size && ramIsTight(os.freemem(), os.totalmem(), this.settings.get('trimWhenFreeBelowPct'))) {
+        // one client per step, spread evenly over the interval, so many clients are never emptied in the same moment
+        const now = Date.now();
+        const pid = pickTrim([...this.instances.values()], { now, trimMin, lastTrimAt: this.lastTrim || 0, trimmedAt: this.trimmedAt });
+        if (pid !== null) {
+          this.lastTrim = now;
+          this.trimmedAt.set(pid, now);
+          this.markTrimmed(this.instances.get(pid), now);
+          for (const k of [...this.trimmedAt.keys()]) if (!this.instances.has(k)) this.trimmedAt.delete(k);
+          const who = this.accounts.get(this.instances.get(pid)?.accountId)?.username || pid;
+          this.helper.call('tune', { pids: [pid], trim: true }).then((n) => log.info(`trimmed memory: ${who}${n ? '' : ' (client not found)'}`), () => {});
+        }
+      }
+      if (this.helper.memory && Date.now() - this.memoryAt > 15000) {
+        this.memoryAt = Date.now();
+        this.helper.memory().then((m) => {
+          if (m && m.freeBytes >= 0) this.lastMemory = { freeBytes: m.freeBytes, limitBytes: m.limitBytes, at: Date.now() };
+        }, (e) => log.debug('memory read: ' + e.message));
       }
       this.lastSync = Date.now();
       if (changed) this.persist();
@@ -546,10 +693,32 @@ class Launcher extends EventEmitter {
     });
   }
 
-  applyFFlags(exePath) {
+  /** Writes fpsCap, graphicsLevel and the window size into Roblox's user settings (GlobalBasicSettings_*.xml). Each is skipped at 0. */
+  applyUserSettings(acc) {
+    const eff = effectivePerf({ fpsCap: this.settings.get('fpsCap'), graphicsLevel: this.settings.get('graphicsLevel'), windowWidth: this.settings.get('windowWidth'), windowHeight: this.settings.get('windowHeight') }, acc && acc.perf);
+    const cap = eff.fpsCap;
+    const opts = { graphicsLevel: eff.graphicsLevel, windowWidth: eff.windowWidth, windowHeight: eff.windowHeight };
+    if (cap <= 0 && !opts.graphicsLevel && !(opts.windowWidth && opts.windowHeight)) return;
+    const dir = process.env.IRAM_ROBLOX_DIR || (process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, 'Roblox'));
+    if (!dir) return;
+    let files = [];
+    try { files = fs.readdirSync(dir).filter((f) => /^GlobalBasicSettings_\d+\.xml$/i.test(f)); } catch { return; }
+    for (const f of files) {
+      try {
+        const p = path.join(dir, f);
+        const cur = fs.readFileSync(p, 'utf8');
+        let next = cur;
+        if (cap > 0) next = setFramerateCap(next, cap) || next;
+        next = applyClientSettings(next, opts) || next;
+        if (next !== cur) atomicWrite(p, next);
+      } catch (e) { log.warn('could not update client settings in ' + f + ': ' + e.message); }
+    }
+  }
+  applyFFlags(exePath, acc) {
+    this.applyUserSettings(acc);
     const flags = buildFlags({
       fastProfile: this.settings.get('fastProfile'),
-      fpsCap: this.settings.get('fpsCap'),
+      graphicsApi: this.settings.get('graphicsApi'),
       customFFlags: this.settings.get('customFFlags'),
     });
     // remove flags we wrote before but which are no longer configured
@@ -623,8 +792,9 @@ class Launcher extends EventEmitter {
 
   /** Multi-instance: wait until every other client started here has been up long enough to finish signing in. */
   async waitForSignInsSettled(accountId, job) {
-    const settleMs = 60 * 1000;
-    const deadline = Date.now() + 10 * 60 * 1000;
+    const gap = Number(this.settings.get('signInGapSec'));
+    const settleMs = (gap > 0 ? gap : 60) * 1000;
+    const deadline = Date.now() + Math.max(10 * 60 * 1000, 2 * settleMs);
     for (;;) {
       if (job && job.cancelled) throw cancelledError(accountId);
       const signingIn = [...this.instances.values()].filter((i) => i.accountId !== accountId && Date.now() - (i.startedAt || 0) < settleMs);
@@ -678,9 +848,17 @@ class Launcher extends EventEmitter {
 
   /** Stop: cancel waiting launches and keep these accounts from being relaunched automatically for 10 min. ids = null means all. */
   stopAccounts(ids = null) {
-    const list = ids || this.accounts.list.map((a) => a.id);
+    const keep = ids ? new Set() : this.mainIds();
+    const list = (ids || this.accounts.list.map((a) => a.id)).filter((id) => !keep.has(id));
+    if (!ids && keep.size) { for (const id of list) this.holds.set(id, Date.now() + 10 * 60000); return this.cancelQueued(list); }
     for (const id of list) this.holds.set(id, Date.now() + 10 * 60000);
     return this.cancelQueued(ids);
+  }
+
+  /** Ids of Main accounts that bulk close actions must leave alone (empty when the setting is off). */
+  mainIds() {
+    if (this.settings.get('closeAllKeepsMain') === false) return new Set();
+    return new Set((this.accounts.list || []).filter((a) => a.main).map((a) => a.id));
   }
 
   /** True while keep-alive relaunches of this account are paused by a cancel. */
@@ -697,6 +875,15 @@ class Launcher extends EventEmitter {
     if (!acc) throw new Error('account no longer exists');
     const name = acc.username;
     stillWanted();
+    if (this.settings.get('dryRun') === true) {
+      // Dry run: report what a real launch would do, start nothing, touch no files.
+      const flags = buildFlags({ fastProfile: this.settings.get('fastProfile'), graphicsApi: this.settings.get('graphicsApi'), customFFlags: this.settings.get('customFFlags') });
+      log.info(`dry run: would launch ${name} -> ${target && (target.label || target.type) || 'last game'} (${reason}); flags ${JSON.stringify(flags)}; ${acc.status === 'valid' ? 'cookie valid' : 'cookie status ' + acc.status}; no process started`);
+      return { dryRun: true, pid: null };
+    }
+    if (['keep-alive', 'api', 'sign-in retry'].includes(reason) && !scheduleActive(this.settings.get('schedule'))) {
+      throw Object.assign(new Error(`${name}: automatic launch skipped, outside the run window`), { guardPaused: true, outsideWindow: true });
+    }
     if (this.guard && this.guard.blocks(reason)) {
       throw Object.assign(new Error(`${name}: automatic launch skipped, the captcha guard has paused automation`), { guardPaused: true });
     }
@@ -709,6 +896,10 @@ class Launcher extends EventEmitter {
       log.info(`${name} already running; skipped`);
       return { pid: existing[0].pid, skipped: true };
     }
+    if (typeof this.beforeLaunch === 'function') {
+      try { await this.beforeLaunch({ accountId, reason }); } catch (e) { log.warn(`before-launch step failed: ${e.message}`); }
+      stillWanted();
+    }
     const rbx = await this.resolveRoblox();
     if (!rbx) throw new Error('Roblox is not installed (could not find RobloxPlayerBeta / roblox-player handler)');
     if (existing.length && mode === 'replace') {
@@ -716,14 +907,14 @@ class Launcher extends EventEmitter {
       await this.kill(existing.map((i) => i.pid), 'replaced'); // kill() already waits until the processes are gone
     }
     if (this.settings.get('multiInstance')) {
-      await this.applyMulti();
+      await this.applyMulti(true);
       // Without the lock, starting another client would silently close the running ones.
       const others = [...this.instances.values()].filter((i) => i.accountId !== accountId).length + this.unknown.length;
       if (!this.multiActive && others > 0) {
-        throw new Error('Multi-instance lock is held by a running Roblox client, so launching would close the others. Close all Roblox windows once (Clients -> Close ALL) and launch again.');
+        throw new Error('Multi-instance lock is owned by a running Roblox client and could not be freed without closing it, so launching would close the others. Close all Roblox windows once (Clients -> Close ALL) and launch again.');
       }
     }
-    this.applyFFlags(rbx.path);
+    this.applyFFlags(rbx.path, acc);
     if (this.settings.get('neverUpdateRoblox')) {
       this.applyUpdateBlock(); // a version folder may have been installed since startup
       if (rbx.testBuild) setUpdatersBlocked(true, [{ dir: path.dirname(rbx.path) }]);
@@ -764,7 +955,8 @@ class Launcher extends EventEmitter {
     if (job) job.started = true; // the client is being started now: a cancel from here on has no effect
     log.info(`launching ${name} -> ${target.label || target.type} (${reason}) via ${rbx.via}`);
     try {
-      const child = spawn(rbx.path, [uri], { detached: true, stdio: 'ignore', windowsHide: false,
+      const env = clientEnv(DATA, accountId);
+      const child = spawn(rbx.path, [uri], { detached: true, stdio: 'ignore', windowsHide: false, env,
         ...(rbx.testBuild ? { cwd: path.dirname(rbx.path) } : {}),
       });
       if (rbx.testBuild) {
@@ -782,7 +974,7 @@ class Launcher extends EventEmitter {
         throw new Error(`Could not start the Roblox test executable (${e.message})`, { cause: e });
       }
       log.warn(`direct spawn failed (${e.message}); falling back to protocol handler`);
-      spawn('rundll32.exe', ['url.dll,FileProtocolHandler', uri], { detached: true, stdio: 'ignore' }).unref();
+      spawn('rundll32.exe', ['url.dll,FileProtocolHandler', uri], { detached: true, stdio: 'ignore', env: clientEnv(DATA, accountId) }).unref();
     }
 
     const deadline = Date.now() + this.settings.get('launchTimeoutSec') * 1000;
@@ -902,9 +1094,12 @@ class Launcher extends EventEmitter {
   /** Apply CPU priority to a client (memory trim is periodic, see sync()). */
   tuneInstance(inst) {
     const pr = this.settings.get('clientPriority');
-    if (inst.tunedPriority === pr) return;
-    inst.tunedPriority = pr;
-    this.helper.call('tune', { pids: [inst.pid], priority: pr }).catch(() => {});
+    const nt = !!this.settings.get('noPowerThrottle');
+    if (!pr && !nt) return;
+    const key = pr + ':' + nt;
+    if (inst.tunedPriority === key) return;
+    inst.tunedPriority = key;
+    this.helper.call('tune', { pids: [inst.pid], priority: pr, noThrottle: nt }).catch(() => {});
   }
 
   /**
@@ -988,7 +1183,7 @@ class Launcher extends EventEmitter {
     for (const pid of pids) {
       if (alive.has(pid)) continue;
       const inst = this.instances.get(pid);
-      if (inst) { this.instances.delete(pid); inst.killReason = why; this.emit('exit', inst); }
+      if (inst) { this.instances.delete(pid); inst.killReason = why; this.helper.call('unwatch', { pid }).catch(() => {}); this.emit('exit', inst); }
     }
     this.persist();
     this.emit('change');
@@ -1026,39 +1221,115 @@ class Launcher extends EventEmitter {
     return { clientsLeft, lockHolder: 'stopped' };
   }
 
+  /**
+   * Closes every client one by one, CLOSE_GAP_MIN_MS..CLOSE_GAP_MAX_MS apart, in the background.
+   * Returns at once with how many are queued; a second call while one is running does nothing.
+   * gapMs and sleepFn exist so tests do not wait in real time.
+   */
+  closeAllStaggered(includeUnknown = true, { gapMs = closeGapMs, sleepFn = sleep } = {}) {
+    if (this.closing) return { queued: 0, already: true, done: this.closing };
+    const keep = this.mainIds();
+    const pids = [...[...this.instances.values()].filter((i) => !keep.has(i.accountId)).map((i) => i.pid), ...(includeUnknown ? this.unknown.map((u) => u.pid) : [])];
+    const startedAt = Date.now();
+    const done = (async () => {
+      let first = true;
+      for (const pid of pids) {
+        if ((this.tombstones.get(pid)?.at ?? 0) >= startedAt) continue; // already taken down together with its launch tag
+        if (!this.instances.has(pid) && !this.unknown.some((u) => u.pid === pid)) continue; // exited on its own
+        if (!first) await sleepFn(gapMs());
+        first = false;
+        try { await this.kill([pid], 'close all'); } catch (e) { log.warn('close all: pid ' + pid + ': ' + e.message); }
+      }
+    })().catch((e) => log.warn('close all: ' + e.message)).finally(() => { this.closing = null; });
+    this.closing = done;
+    log.info('close all: closing ' + pids.length + ' client(s) one by one, ' + CLOSE_GAP_MIN_MS / 1000 + '-' + CLOSE_GAP_MAX_MS / 1000 + ' s apart');
+    return { queued: pids.length, already: false, done };
+  }
+
   async killAll(includeUnknown = true) {
     const pids = [...this.instances.keys(), ...(includeUnknown ? this.unknown.map((u) => u.pid) : [])];
     return this.kill(pids, 'close all');
+  }
+
+  markTrimmed(inst, at) { if (inst) { inst.trimPendingAt = at; inst.trimBaseMB = null; } }
+
+  /** Frees idle RAM on every running client, one at a time (TRIM_NOW_GAP_MS apart). Returns how many clients are queued; the work runs in the background. */
+  trimNow() {
+    if (this.trimmingNow) return 0;
+    const pids = [...this.instances.keys()];
+    if (!pids.length) return 0;
+    this.trimmingNow = true;
+    (async () => {
+      let done = 0;
+      try {
+        for (const pid of pids) {
+          if (!this.instances.has(pid)) continue;
+          const n = await this.helper.call('tune', { pids: [pid], trim: true }).catch(() => 0);
+          if (n) { done++; this.trimmedAt.set(pid, Date.now()); this.markTrimmed(this.instances.get(pid), Date.now()); }
+          await sleep(TRIM_NOW_GAP_MS);
+        }
+        this.lastTrim = Date.now();
+        log.info(`freed idle RAM on ${done} of ${pids.length} client(s)`);
+      } finally { this.trimmingNow = false; }
+    })();
+    return pids.length;
   }
 
   async tile() {
     const order = new Map(this.accounts.list.map((a, i) => [a.id, i]));
     const hwnds = [...this.instances.values()].filter((i) => i.hwnd)
       .sort((a, b) => (order.get(a.accountId) ?? 999) - (order.get(b.accountId) ?? 999)).map((i) => i.hwnd);
-    return this.helper.call('tile', { hwnds, cols: this.settings.get('tileColumns') });
+    const w = Number(this.settings.get('windowWidth')) || 0;
+    const h = Number(this.settings.get('windowHeight')) || 0;
+    return this.helper.call('tile', { hwnds, cols: this.settings.get('tileColumns'), ...(w > 0 && h > 0 ? { width: w, height: h } : {}) });
   }
 
   async windowCmd(pid, cmd) {
     const inst = this.instances.get(Number(pid)) || this.unknown.find((u) => u.pid === Number(pid));
     if (!inst || !inst.hwnd) throw new Error('window not found');
     if (cmd === 'focus') return this.helper.call('focus', { hwnd: inst.hwnd });
+    if (cmd === 'park' || cmd === 'unpark') { inst.parkedAt = Date.now(); inst.parked = cmd === 'park'; return this.helper.call('park', { hwnd: inst.hwnd, mode: cmd === 'unpark' ? 'back' : 'off' }); }
     return this.helper.call('show', { hwnd: inst.hwnd, mode: cmd === 'minimize' ? 6 : 9 });
+  }
+
+  /** State label, growth trend and sparkline for one running client (see metrics.js). */
+  clientView(i) {
+    const c = classifyClient({ inst: { ...i, log: i.logState } });
+    const key = metricsKey(i);
+    const slope = this.metrics.slope(key);
+    const t = trendOf(slope);
+    return { state: c.state, stateLabel: c.label, growth: { mbPerMin: slope, trend: t.id, trendLabel: t.label, spark: this.metrics.spark(key, 40) } };
   }
 
   publicView() {
     return {
       instances: [...this.instances.values()].map((i) => ({
         pid: i.pid, accountId: i.accountId, startedAt: i.startedAt, target: i.target, reason: i.reason,
-        memMB: i.memMB, hung: i.hung, minimized: i.minimized, muted: !!i.muted, verified: i.verified ?? null,
-        log: i.logState ? { inGame: i.logState.inGame, jobId: i.logState.jobId, placeId: i.logState.placeId, reason: i.logState.reason, disconnectedAt: i.logState.disconnectedAt || 0 } : null,
+        memMB: i.memMB, privMB: i.privMB ?? null, cpuPct: i.cpuPct ?? null, handles: i.handles ?? null, capped: i.capApplied || 0, hung: i.hung, minimized: i.minimized, muted: !!i.muted, verified: i.verified ?? null,
+        ...this.clientView(i),
+        log: i.logState ? { inGame: i.logState.inGame, jobId: i.logState.jobId, placeId: i.logState.placeId, reason: i.logState.reason, disconnectedAt: i.logState.disconnectedAt || 0, graphicsApi: i.logState.graphicsApi || '', robloxVersion: i.logState.robloxVersion || '' } : null,
       })),
       unknown: this.unknown,
       queued: this.queued,
       multi: this.multiStatus,
+      fleet: this.fleetView(),
+    };
+  }
+
+  /** Fleet summary for the Clients page. "room" is the smaller of what free commit allows and what the launch gate would let in. */
+  fleetView() {
+    const insts = [...this.instances.values()];
+    const f = fleetSummary({ instances: insts.map((i) => ({ key: metricsKey(i), privMB: i.privMB })), store: this.metrics, memory: this.lastMemory });
+    const gate = gateRoom({ limitGB: f.limitGB, keepGB: COMMIT_KEEP_FREE_BYTES / GB, running: insts.length, peakGB: f.perClientGB, floorGB: COMMIT_PER_CLIENT_BYTES / GB });
+    const room = f.room == null ? gate : gate == null ? f.room : Math.min(f.room, gate);
+    return {
+      ...f, room, gateRoom: gate,
+      memoryAt: this.lastMemory ? this.lastMemory.at : 0,
+      cpuPct: Math.round(insts.reduce((a, i) => a + (Number.isFinite(i.cpuPct) ? i.cpuPct : 0), 0) * 10) / 10,
     };
   }
 
   stop() { clearInterval(this.timer); this.persist(); }
 }
 
-module.exports = { Launcher, resolveTarget, placeLauncherUrl, launchUri, detectRoblox, resolveRoblox, pickUpToDate, currentRobloxVersion, resetVersionCache, setUpdatersBlocked, BLOCKED_SUFFIX };
+module.exports = { clientWebviewDir, metricsKey, closeGapMs, CLOSE_GAP_MIN_MS, CLOSE_GAP_MAX_MS, Launcher, resolveTarget, placeLauncherUrl, launchUri, detectRoblox, resolveRoblox, pickUpToDate, currentRobloxVersion, resetVersionCache, setUpdatersBlocked, BLOCKED_SUFFIX };

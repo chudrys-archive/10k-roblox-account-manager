@@ -24,6 +24,7 @@ function setup(overWatchdog = {}) {
   launcher.kill = async () => 1;
   const notes = [];
   const wd = new Watchdog({ launcher, accounts, settings, alerts: { send() {} } });
+  wd.st('a1').armed = true; // a client of this account was open
   wd.on('event', (a, kind, msg) => notes.push([kind, msg]));
   return { wd, acc, launcher, notes };
 }

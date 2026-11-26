@@ -1,5 +1,5 @@
 # Paints the manager's Edge app window with a black caption (Windows 11), dark mode on Windows 10. Best effort.
-param([string]$Title = "Isa's Roblox Account Manager")
+param([string]$Title = "10k's Account Manager")
 Add-Type -TypeDefinition @"
 using System;
 using System.Text;

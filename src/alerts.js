@@ -5,6 +5,19 @@ const log = logger('alerts');
 const COLORS = { info: 0x4aa8ff, ok: 0x34d399, warn: 0xfbbf24, error: 0xf87171 };
 const WEBHOOK_RE = /^https:\/\/(?:(?:ptb|canary)\.)?discord(?:app)?\.com\/api\/webhooks\/\d+\/[\w-]+$/;
 
+const HHMM = /^([01]\d|2[0-3]):([0-5]\d)$/;
+
+/** Pure: true when local time `now` falls inside quiet hours { enabled, start, end } ("HH:MM"; may cross midnight). */
+function inQuietHours(quiet, now = new Date()) {
+  if (!quiet || !quiet.enabled) return false;
+  const s = HHMM.exec(quiet.start || ''); const e = HHMM.exec(quiet.end || '');
+  if (!s || !e) return false;
+  const m = now.getHours() * 60 + now.getMinutes();
+  const a = Number(s[1]) * 60 + Number(s[2]); const b = Number(e[1]) * 60 + Number(e[2]);
+  if (a === b) return false;
+  return a < b ? m >= a && m < b : m >= a || m < b;
+}
+
 /**
  * Discord webhook alerts. Events: crash, disconnect (kicked/lost connection), sameAccount,
  * invalid (cookie expired), throttled (relaunch limit hit), launchFail.
@@ -27,6 +40,7 @@ class Alerts {
   send(type, title, description, { level = 'warn', key = '', force = false } = {}) {
     const c = this.cfg();
     if (!c.webhook || (!force && !c.events[type])) return;
+    if (!force && level !== 'error' && inQuietHours(c.quiet)) return; // quiet hours hold back everything except errors
     const k = `${type}:${key}`;
     const cool = force ? 0 : c.cooldownMin * 60000;
     if (cool && Date.now() - (this.lastSent.get(k) || 0) < cool) return;
@@ -76,4 +90,4 @@ class Alerts {
   }
 }
 
-module.exports = { Alerts };
+module.exports = { Alerts, inQuietHours };

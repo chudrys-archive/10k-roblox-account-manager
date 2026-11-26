@@ -16,8 +16,8 @@ using System.Windows.Forms;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
 
-[assembly: AssemblyTitle("Isa's Roblox Account Manager")]
-[assembly: AssemblyProduct("Isa's Roblox Account Manager")]
+[assembly: AssemblyTitle("10k's Account Manager")]
+[assembly: AssemblyProduct("10k's Account Manager")]
 
 // ──────────────────────────────────────────────────────────────────────────────
 //  WindowsLauncher — self-extracting installer + WinForms/WebView2 host
@@ -40,7 +40,7 @@ using Microsoft.Web.WebView2.WinForms;
 internal static class WindowsLauncher
 {
     private const string AppName     = "IsaRobloxAccountManager";
-    private const string FriendlyName = "Isa's Roblox Account Manager";
+    private const string FriendlyName = "10k's Account Manager";
 
     // Static constructor runs before Main, so the resolver is in place before
     // any method that references WebView2 types is JIT-compiled.
@@ -184,7 +184,9 @@ internal static class WindowsLauncher
             // ShowManagerWindow is a separate method so its body is JIT-compiled
             // only after the assembly resolver above is registered — that guarantees
             // the WebView2 managed DLLs resolve from embedded resources.
-            ShowChromeWindow(managerUrl, appDir, nodeProcess, runtime);
+            // The built-in WebView2 window needs no browser. Chrome or Edge is only the fallback if WebView2 cannot start.
+            if (!ShowManagerWindow(managerUrl, appDir, nodeProcess))
+                ShowChromeWindow(managerUrl, appDir, nodeProcess, runtime);
 
             // Form closed: kill node if it is still running.
             try { if (!nodeProcess.HasExited) nodeProcess.Kill(); } catch { }
@@ -201,7 +203,8 @@ internal static class WindowsLauncher
 
     // Keep this in a separate method so the JIT does not load ManagerForm
     // (and therefore WebView2 assemblies) until after AssemblyResolve is hooked.
-    private static void ShowManagerWindow(string url, string appDir, Process nodeProcess)
+    // Returns false when the WebView2 control could not start, so the caller can fall back to a browser window.
+    private static bool ShowManagerWindow(string url, string appDir, Process nodeProcess)
     {
         using (var form = new ManagerForm(url, appDir))
         {
@@ -224,6 +227,7 @@ internal static class WindowsLauncher
             catch { /* process may have already exited; that's fine */ }
 
             Application.Run(form);
+            return !form.StartFailed;
         }
     }
 
@@ -609,9 +613,10 @@ internal static class WindowsLauncher
 internal sealed class ManagerForm : Form
 {
     private readonly WebView2 _wv;
+    internal bool StartFailed;
     private readonly string   _url;
     private readonly string   _appDir;
-    private const string Title = "Isa's Roblox Account Manager";
+    private const string Title = "10k's Account Manager";
 
     internal ManagerForm(string url, string appDir)
     {
@@ -661,10 +666,9 @@ internal sealed class ManagerForm : Form
 
             _wv.Source = new Uri(_url);
         }
-        catch (Exception ex)
+        catch (Exception)
         {
-            MessageBox.Show("Could not start the browser view:\n" + ex.Message,
-                Title, MessageBoxButtons.OK, MessageBoxIcon.Error);
+            StartFailed = true; // the launcher falls back to a browser window
             Close();
         }
     }

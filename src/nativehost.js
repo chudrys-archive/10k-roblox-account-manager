@@ -1,4 +1,4 @@
-'use strict';
+﻿'use strict';
 const fs = require('fs');
 const path = require('path');
 const { execFile } = require('child_process');
@@ -58,7 +58,7 @@ async function registerCapture({ dataDir, nodePath = process.execPath, regAdd = 
   const manifestPath = path.join(hostDir, HOST_NAME + '.json');
   const manifest = {
     name: HOST_NAME,
-    description: 'Isa Roblox Account Manager login capture',
+    description: "10k's Account Manager login capture",
     path: bat,
     type: 'stdio',
     allowed_origins: [`chrome-extension://${EXTENSION_ID}/`],

@@ -7,6 +7,9 @@ const { Alerts } = require('./alerts');
 const { LogWatcher } = require('./logwatch');
 const { Settings } = require('./settings');
 const { WinHelper } = require('./winhelper');
+const { Tray } = require('./tray');
+const { Executor } = require('./executor');
+const appWindow = require('./appwindow');
 const { Vault } = require('./vault');
 const { AccountStore } = require('./accounts');
 const { Launcher } = require('./launcher');
@@ -18,7 +21,10 @@ const { CaptchaGuard } = require('./captchaguard');
 const { UpdateChecker } = require('./updatecheck');
 const { CaptureGate } = require('./capture');
 const { registerCapture, captureBase } = require('./nativehost');
-const { History } = require('./history');
+const { History, recordDisconnect } = require('./history');
+const { RunLog, buildRecord } = require('./runlog');
+const backup = require('./backup');
+const APP_VERSION = require('../package.json').version;
 
 const log = logger('main');
 const LOCK = path.join(DATA, 'manager.lock');
@@ -42,7 +48,16 @@ function killStaleEdgeAppWindows(profile) {
   } catch { /* ignore — no stale windows, or PowerShell unavailable */ }
 }
 
+// The manager's own window (native WebView2, no browser needed). A browser app window is the fallback when it cannot start,
+// or when Settings > General > Manager window is set to Browser window.
 function openUi(url, settings) {
+  if (settings.get('windowMode') === 'browser') return openBrowserWindow(url, settings);
+  appWindow.open(url, DATA, log)
+    .then((ok) => { if (!ok) openBrowserWindow(url, settings); })
+    .catch((e) => { log.warn('window: ' + e.message); openBrowserWindow(url, settings); });
+}
+
+function openBrowserWindow(url, settings) {
   const edge = findBrowser(settings.get('browserPath'));
   if (edge) {
     // The manager's window lives in its own Edge profile: a stale one is killed by profile, and the user's own
@@ -81,7 +96,7 @@ function createShortcut() {
     `$s.TargetPath = '${q(PACKAGED_EXE || 'wscript.exe')}'`,
     `$s.Arguments = '${PACKAGED_EXE ? '' : `"${q(HIDDEN_LAUNCHER)}"`}'`,
     `$s.WorkingDirectory = '${q(PACKAGED_EXE ? path.dirname(PACKAGED_EXE) : ROOT)}'`,
-    "$s.Description = 'Isa''s Roblox Account Manager'",
+    "$s.Description = '10k''s Account Manager'",
     PACKAGED_EXE || fs.existsSync(icon) ? `$s.IconLocation = '${q(PACKAGED_EXE || icon)},0'` : '',
     '$s.Save()',
   ].filter(Boolean).join('; ');
@@ -90,6 +105,8 @@ function createShortcut() {
 }
 
 async function main() {
+  const restored = backup.applyPendingRestore(DATA, { appVersion: APP_VERSION, log: (m) => logger('backup').info(m) });
+  if (restored.applied) console.log(`  Restored backup ${restored.name}. Your data from before is saved as ${restored.before || 'a backup'}.`);
   const settings = new Settings();
 
   // single instance: if already running, just open its UI
@@ -112,9 +129,18 @@ async function main() {
   await helper.start();
   const vault = new Vault(helper);
   await vault.init();
+  const autoBackup = () => {
+    try {
+      if (!backup.needsAutoBackup(DATA)) return;
+      logger('backup').info('automatic backup ' + backup.createBackup(DATA, { reason: 'auto', appVersion: APP_VERSION }).name);
+    } catch (e) { logger('backup').warn('automatic backup skipped: ' + e.message); }
+  };
+  autoBackup();
+  setInterval(autoBackup, 6 * 3600 * 1000).unref();
   const accounts = new AccountStore(vault);
   const guard = new CaptchaGuard({ settings });
   const history = new History();
+  const runlog = new RunLog({ file: path.join(DATA, 'runs.jsonl') });
   const launcher = new Launcher({ helper, settings, accounts, guard });
   const alerts = new Alerts({ settings });
   const logwatch = new LogWatcher({ launcher });
@@ -135,16 +161,27 @@ async function main() {
       alerts.send('captchaGuard', 'Automation paused', `${acc.username} hit a captcha / verification. Keep-alive rejoins, restarts, server hops and API launches are stopped for every account until you press Resume in the manager.`, { level: 'error', key: 'guard' });
     }
   });
-  logwatch.on('verification', (inst) => accounts.markVerification(accounts.get(inst.accountId), 'Roblox client'));
+  logwatch.on('verification', (inst) => {
+    const acc = accounts.get(inst.accountId);
+    if (!accounts.markVerification(acc, 'Roblox client')) return;
+    // The client also logs this when Roblox has locked or moderated the account: re-check it so the label says which.
+    setTimeout(() => accounts.validate(acc).then(() => accounts.save()).catch(() => {}), 5000);
+  });
+  logwatch.on('joinchallenge', (inst) => {
+    const acc = accounts.get(inst.accountId);
+    if (!acc) return;
+    history.add(acc.id, 'challenge', 'Roblox showed a challenge in the client window while joining; solve it there, the client continues by itself');
+    log.info(`${acc.username}: Roblox challenge shown in the client window (join-game); client left running`);
+  });
   // Account timeline (History): what the manager saw and did for each account
   watchdog.on('event', (acc, kind, msg) => history.add(acc.id, kind, msg));
+  launcher.on('exit', (inst) => {
+    const rec = runlog.add(buildRecord({ ...inst, log: inst.logState }, accounts.get(inst.accountId)?.username));
+    history.add(inst.accountId, 'run-end', `${rec.kind}: ${rec.reason}; ran ${Math.round(rec.uptimeMs / 60e3)} min, peak ${rec.peakPrivMB} MB`);
+  });
   launcher.on('launched', (inst) => history.add(inst.accountId, 'launch', `Started (${inst.reason}) on ${inst.target?.label || inst.target?.type || 'a game'}`));
   logwatch.on('join', (inst, ls) => history.add(inst.accountId, 'join', `Joined server ${ls.jobId ? ls.jobId.slice(0, 8) : '?'} in place ${ls.placeId}`));
-  logwatch.on('disconnect', (inst, ls) => {
-    if (!ls.disconnectedAt || ls.reportedAt === ls.disconnectedAt) return; // Roblox writes several lines per disconnect
-    ls.reportedAt = ls.disconnectedAt;
-    history.add(inst.accountId, 'disconnect', `${ls.reason}${ls.code ? ` (code ${ls.code})` : ''}`);
-  });
+  logwatch.on('disconnect', (inst, ls) => recordDisconnect(history, inst.accountId, ls));
   // live presence for every account (one batched request)
   setInterval(() => {
     const sec = settings.get('presencePollSec');
@@ -152,6 +189,9 @@ async function main() {
     accounts.presenceAt = Date.now();
     accounts.pollPresence().catch((e) => log.debug('presence poll: ' + e.message));
   }, 5000).unref();
+
+  const cookieChecker = require('./cookiecheck').createCookieChecker({ accounts, settings, log });
+  setInterval(() => cookieChecker.tick(), 10 * 60e3).unref();
 
   const onUnlocked = () => {
     if (settings.get('autoValidateOnStart') && accounts.list.length) {
@@ -161,7 +201,10 @@ async function main() {
 
   const updates = new UpdateChecker();
 updates.start();
-const ctx = { settings, vault, accounts, launcher, watchdog, browser, antiAfk, alerts, guard, history, onUnlocked, createShortcut, updates, capture, captureExtDir: path.join(captureBase(DATA), 'extension') };
+const tray = new Tray();
+const executor = new Executor({ settings, launcher, accounts, alerts });
+launcher.beforeLaunch = () => executor.ensureOpen();
+const ctx = { tray, executor, settings, vault, accounts, launcher, watchdog, browser, antiAfk, alerts, guard, history, runlog, onUnlocked, createShortcut, updates, capture, captureExtDir: path.join(captureBase(DATA), 'extension') };
   const server = new Server(ctx);
   const port = await server.listen();
   registerCapture({ dataDir: DATA }).catch((e) => require('./util').logger('capture-host').error(e.message));
@@ -171,18 +214,35 @@ const ctx = { settings, vault, accounts, launcher, watchdog, browser, antiAfk, a
   await launcher.init();
   logwatch.start();
   watchdog.start();
+  executor.start();
   antiAfk.start();
 
   const url = `http://127.0.0.1:${port}/?t=${server.token}`;
   log.info(`UI ready on http://127.0.0.1:${port}`);
-  console.log(`\n  Isa's Roblox Account Manager is running.\n  UI: ${url}\n  (closing this window or Ctrl+C quits the manager; your Roblox clients keep running)\n`);
+  console.log(`\n  10k's Account Manager is running.\n  UI: ${url}\n  (closing this window or Ctrl+C quits the manager; your Roblox clients keep running)\n`);
   if (settings.get('openUiOnStart') && !noUi) openUi(url, settings);
+
+  // Tray icon and hotkeys. Close all is the same staggered close as the Close all button.
+  tray.on('open', (focused) => { if (!focused) openUi(url, settings); }); // an open window is only brought to the front
+  tray.on('closeAll', () => {
+    try {
+      launcher.stopAccounts(null);
+      const r = launcher.closeAllStaggered(true);
+      log.info(`tray: closing all clients one by one (${r.queued} queued)`);
+      tray.balloon("10k's Account Manager", r.queued ? `Closing ${r.queued} client(s) one at a time` : 'No clients to close');
+    } catch (e) { log.warn('tray close all: ' + e.message); }
+  });
+  tray.on('quit', () => shutdown('tray'));
+  tray.on('change', () => server.pushState());
+  const applyTray = (s) => { try { tray.apply(s.tray); } catch (e) { log.warn('tray: ' + e.message); } server.pushState(); };
+  settings.on('change', applyTray);
+  applyTray(settings.get());
 
   let stopping = false;
   const shutdown = async (sig, { closeClients = false } = {}) => {
     if (stopping) return; stopping = true;
     log.info(`shutting down (${sig}${closeClients ? ', closing Roblox clients' : ''})`);
-    watchdog.stop();
+    watchdog.stop({ clearResume: closeClients });
     antiAfk.stop();
     guard.stop();
     logwatch.stop();
@@ -192,6 +252,8 @@ const ctx = { settings, vault, accounts, launcher, watchdog, browser, antiAfk, a
     server.close();
     // stop background processes too: Roblox clients (if asked), the lock holder, the window helper
     await launcher.stopBackground({ closeClients }).catch((e) => log.warn('stop background: ' + e.message));
+    executor.stopWatching();
+    await tray.stop().catch(() => {});
     await helper.stop();
     try { if (readJson(LOCK, {}).pid === process.pid) fs.rmSync(LOCK, { force: true }); } catch {}
     setTimeout(() => process.exit(0), 300);
@@ -211,6 +273,33 @@ const ctx = { settings, vault, accounts, launcher, watchdog, browser, antiAfk, a
     if (lag > 2000) log.warn(`event loop blocked for ${Math.round(lag / 1000)}s`);
   }, 1000);
   if (lagTimer.unref) lagTimer.unref();
+  // Run window: close clients (staggered) when the window ends, if the person asked for that
+  let wasActive = require('./schedule').isActive(settings.get('schedule'));
+  const schedTimer = setInterval(() => {
+    try {
+      const sc = settings.get('schedule');
+      const now = require('./schedule').isActive(sc);
+      if (wasActive && !now && sc && sc.enabled && sc.closeAtEnd) {
+        log.info('schedule: run window ended, closing clients one by one');
+        launcher.stopAccounts(null);
+        launcher.closeAllStaggered(true);
+      }
+      wasActive = now;
+    } catch (e) { log.debug('schedule check: ' + e.message); }
+  }, 30e3);
+  if (schedTimer.unref) schedTimer.unref();
+  // Memory alert: when the fleet health turns red, say so once per cooldown (the webhook URL is never logged)
+  let lastLevel = 'ok';
+  const levelTimer = setInterval(() => {
+    try {
+      const f = launcher.publicView().fleet;
+      if (f && f.level === 'danger' && lastLevel !== 'danger') {
+        alerts.send('memory', 'Free memory is low', `Free commit ${f.freeGB == null ? 'unknown' : f.freeGB.toFixed(1)} GB, ${f.clients} client(s), growth ${f.gbPerHour == null ? 'unknown' : f.gbPerHour.toFixed(1)} GB/h. Close clients manually, staggered, from the Clients page.`, { level: 'error', key: 'fleet' });
+      }
+      lastLevel = f ? f.level : 'ok';
+    } catch (e) { log.debug('level check: ' + e.message); }
+  }, 60e3);
+  if (levelTimer.unref) levelTimer.unref();
   // Private commit per client every 5 minutes. Shows whether each client keeps growing or levels off.
   const commitTimer = setInterval(async () => {
     try {

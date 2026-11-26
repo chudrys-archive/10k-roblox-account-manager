@@ -54,6 +54,7 @@ test('keep-alive stops retrying for 30 minutes when Roblox asks for verification
     accounts: { loaded: true, list: [acc], get: () => acc, session: () => ({}) },
     alerts: { send: (...a) => sent.push(a) },
   });
+  wd.st('a1').armed = true; // a client of this account was open
   await wd.tick();
   await new Promise((r) => setImmediate(r));
   const s = wd.st('a1');

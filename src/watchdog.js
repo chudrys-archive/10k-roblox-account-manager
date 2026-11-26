@@ -1,12 +1,43 @@
 'use strict';
 const EventEmitter = require('events');
 const { api } = require('./roblox');
-const { logger } = require('./util');
+const path = require('path');
+const { DATA, logger, atomicWrite, readJson } = require('./util');
 const { SAME_ACCOUNT } = require('./logwatch');
 
 const log = logger('watchdog');
 const VERIFY_PAUSE_MS = 30 * 60e3;   // after Roblox asks for verification, wait this long before trying again
 const MAX_REJOIN_DELAY_MS = 10 * 60e3;
+const RESUME_FILE = path.join(DATA, 'keepalive-resume.json');
+const RESUME_MAX_AGE_MS = 12 * 3600e3;   // a resume list older than this is ignored: the PC was off for a long time on purpose
+const RESUME_GRACE_MS = 20e3;            // after the manager starts: let running clients be adopted and Windows settle before anything is launched
+const RESUME_REFRESH_MS = 10 * 60e3;
+const RESUME_MAX_ACCOUNTS = 200;
+
+/**
+ * Which keep-alive accounts to bring back after the manager (or the whole PC) restarted while they were running.
+ * saved = { at, accounts: [id] } as written by the watchdog; accounts that were closed on purpose are never in it.
+ * Returns [{ id, at }]: the time each one may start. They are spread by the launch delay plus a random few seconds, so a
+ * whole fleet does not sign in at once (a sign-in burst is what Roblox answers with a verification).
+ */
+function planResume({ saved, accounts, now = Date.now(), launchDelayMs = 6000, rand = Math.random, maxAgeMs = RESUME_MAX_AGE_MS }) {
+  if (!saved || typeof saved !== 'object' || !Array.isArray(saved.accounts) || !Number.isFinite(saved.at)) return [];
+  if (saved.at > now + 60e3 || now - saved.at > maxAgeMs) return [];
+  const byId = new Map((accounts || []).map((a) => [a.id, a]));
+  const out = [];
+  const seen = new Set();
+  let t = now + RESUME_GRACE_MS;
+  for (const id of saved.accounts.slice(0, RESUME_MAX_ACCOUNTS)) {
+    if (typeof id !== 'string' || seen.has(id)) continue;
+    seen.add(id);
+    const a = byId.get(id);
+    if (!a || !a.keepAlive || !a.keepAlive.enabled || !a.keepAlive.target) continue;
+    if (a.status === 'banned' || a.status === 'invalid' || a.status === 'verify') continue;
+    out.push({ id, at: t });
+    t += Math.max(0, launchDelayMs) + Math.round(rand() * 5000);
+  }
+  return out;
+}
 
 /**
  * How long to wait before rejoining. Every relaunch asks Roblox for a new sign-in ticket and joins
@@ -47,8 +78,14 @@ const PRESENCE = { 0: 'Offline', 1: 'Online (not in game)', 2: 'In game', 3: 'In
  * Failures back off exponentially; relaunches are capped per hour so a broken game can't loop forever.
  */
 class Watchdog extends EventEmitter {
-  constructor({ launcher, accounts, settings, logwatch, alerts, guard = null }) {
+  constructor({ launcher, accounts, settings, logwatch, alerts, guard = null, resumeFile = RESUME_FILE }) {
     super();
+    this.resumeFile = resumeFile;
+    this.resumeOn = false;      // only the running manager (start()) resumes and records; unit tests drive tick() directly
+    this.resumePlanned = false;
+    this.resumeSaved = '';
+    this.resumeSavedAt = 0;
+    this.stopped = false;
     this.launcher = launcher;
     this.accounts = accounts;
     this.settings = settings;
@@ -62,7 +99,7 @@ class Watchdog extends EventEmitter {
   st(id) {
     let s = this.state.get(id);
     if (!s) {
-      s = { status: 'off', msg: '', failures: 0, nextAttemptAt: 0, launches: [], badChecks: 0, lastPresence: null, lastPresenceAt: 0, jobMisses: 0, presenceBusy: false, drops: [] };
+      s = { status: 'off', msg: '', failures: 0, nextAttemptAt: 0, launches: [], badChecks: 0, lastPresence: null, lastPresenceAt: 0, jobMisses: 0, presenceBusy: false, drops: [], armed: false };
       this.state.set(id, s);
     }
     return s;
@@ -95,6 +132,7 @@ class Watchdog extends EventEmitter {
   }
 
   start() {
+    this.resumeOn = true;
     const loop = async () => {
       try { await this.tick(); } catch (e) { log.error('tick: ' + e.message); }
       this.timer = setTimeout(loop, this.settings.get('watchdog').tickSec * 1000);
@@ -131,12 +169,13 @@ class Watchdog extends EventEmitter {
     }
     this.launcher.on('exit', (inst) => {
       const acc = this.accounts.get(inst.accountId);
-      if (acc && acc.keepAlive.enabled && !inst.killReason) {
+      const byHand = !inst.killReason && inst.exitCode === 0; // clean exit: the window was closed by hand
+      if (acc && acc.keepAlive.enabled && !inst.killReason && !byHand) {
         this.alerts.send('crash', `${acc.username}: client closed`, 'The Roblox client exited unexpectedly (crash or closed window). Keep-alive is relaunching it.', { key: acc.id });
       }
       // exits the person did not ask for count toward a burst; a restart we did ourselves does not
       let extraMs = 0;
-      if (!inst.killReason) {
+      if (!inst.killReason && !byHand) {
         const b = exitBurst(this.exitTimes || []);
         this.exitTimes = b.times;
         extraMs = b.extraMs;
@@ -145,7 +184,7 @@ class Watchdog extends EventEmitter {
       const s = this.st(inst.accountId);
       const w = this.settings.get('watchdog');
       if (!s.nextAttemptAt || s.nextAttemptAt < Date.now()) s.nextAttemptAt = Date.now() + rejoinDelay(s, w) + extraMs;
-      s.msg = `client exited${inst.killReason ? ` (${inst.killReason})` : ''}; relaunching`;
+      s.msg = `client ${byHand ? 'closed by hand' : 'exited'}${inst.killReason ? ` (${inst.killReason})` : ''}; relaunching`;
     });
   }
 
@@ -158,7 +197,8 @@ class Watchdog extends EventEmitter {
   }
 
   async tick() {
-    if (!this.accounts.loaded) return;
+    if (!this.accounts.loaded || this.stopped) return;
+    if (this.resumeOn && !this.resumePlanned) this.applyResume();
     const w = this.settings.get('watchdog');
     const now = Date.now();
     for (const acc of this.accounts.list) {
@@ -167,7 +207,7 @@ class Watchdog extends EventEmitter {
       if (!ka.enabled || !ka.target) {
         // keep the reason if keep-alive paused itself (wrong account / signed in elsewhere) so the user sees why
         if (s.status !== 'off') this.setStatus(s, 'off', s.issue || '');
-        s.failures = 0; s.nextAttemptAt = 0;
+        s.failures = 0; s.nextAttemptAt = 0; s.armed = false;
         continue;
       }
       if (s.issue) { s.issue = ''; s.msg = ''; } // user turned it back on
@@ -179,11 +219,13 @@ class Watchdog extends EventEmitter {
       }
       if (acc.status === 'verify') { this.setStatus(s, 'error', 'needs verification'); continue; }
       if (acc.status === 'invalid' || acc.status === 'banned') { this.setStatus(s, 'error', acc.statusMsg || 'account unusable'); continue; }
-      if (this.launcher.pending.has(acc.id)) { this.setStatus(s, 'launching'); continue; }
-      if (this.launcher.isHeld?.(acc.id) && !this.launcher.byAccount(acc.id).length) { this.setStatus(s, 'waiting', 'launch cancelled - not relaunching'); continue; }
+      if (this.launcher.pending.has(acc.id)) { s.armed = true; this.setStatus(s, 'launching'); continue; }
+      if (this.launcher.isHeld?.(acc.id) && !this.launcher.byAccount(acc.id).length) { s.armed = false; this.setStatus(s, 'waiting', 'launch cancelled - not relaunching'); continue; }
 
       const inst = this.launcher.byAccount(acc.id)[0];
       if (inst) {
+        s.armed = true; // a client of this account is open: from now on, losing it means relaunching it
+        if (s.resumed) { s.resumed = false; s.nextAttemptAt = 0; s.msg = ''; } // it was still open (or came back by itself): nothing to resume
         this.setStatus(s, 'running', s.lastPresence ? PRESENCE[s.lastPresence.userPresenceType] : 'started');
         if (w.killHungAfterSec && inst.hungSince && now - inst.hungSince > w.killHungAfterSec * 1000) {
           log.warn(`${acc.username}: window not responding for ${w.killHungAfterSec}s, restarting`);
@@ -193,6 +235,21 @@ class Watchdog extends EventEmitter {
         // Fast path: the client's log says it was disconnected and it never rejoined (teleports rejoin within seconds)
         const ls = inst.logState;
         if (ls && !ls.inGame && ls.disconnectedAt && now - ls.disconnectedAt > w.disconnectGraceSec * 1000) {
+          if (ls.rejoinLoop) {
+            // The client kept retrying the join and Roblox kept refusing it (usually a moderated account). Restarting
+            // would only repeat that, so close the dead client, turn keep-alive off and re-check the account.
+            log.warn(`${acc.username}: joins are being rejected (${ls.reason}) - closing the client and pausing keep-alive`);
+            this.alerts.send('disconnect', `${acc.username}: cannot rejoin`, `Roblox keeps rejecting this account's join (${ls.reason}). The client was closed and keep-alive turned off. Validate the account to see if it is moderated.`, { level: 'error', key: acc.id });
+            acc.keepAlive.enabled = false;
+            this.accounts.save();
+            s.issue = `paused: ${ls.reason}`;
+            this.setStatus(s, 'off', s.issue);
+            this.note(acc, 'breaker', 'Joins rejected repeatedly. Client closed, keep-alive turned off.');
+            ls.disconnectedAt = 0;
+            await this.launcher.kill([inst.pid], 'joins rejected');
+            this.accounts.validate(acc).catch((e) => log.warn(`${acc.username}: re-check failed: ${e.message}`));
+            continue;
+          }
           if (SAME_ACCOUNT.has(ls.code)) {
             log.warn(`${acc.username}: account was launched somewhere else (code ${ls.code}) - pausing keep-alive to avoid fighting over the session`);
             this.alerts.send('sameAccount', `${acc.username}: signed in elsewhere`, `Roblox disconnected this client because the same account joined a game from another device/client (code ${ls.code}). Keep-alive was turned off for this account.`, { level: 'error', key: acc.id });
@@ -211,7 +268,7 @@ class Watchdog extends EventEmitter {
           await this.restart(acc, inst, `disconnected: ${ls.reason}`);
           continue;
         }
-        if (w.restartEveryMin && now - inst.startedAt > w.restartEveryMin * 60000) {
+        if (w.restartEveryMin && !(acc.main && this.settings.get('closeAllKeepsMain') !== false) && now - inst.startedAt > w.restartEveryMin * 60000) {
           log.info(`${acc.username}: scheduled restart`);
           await this.restart(acc, inst, 'scheduled restart');
           continue;
@@ -225,7 +282,13 @@ class Watchdog extends EventEmitter {
         continue;
       }
 
-      // not running
+      // Not running. Keep-alive only brings back a client it has seen running (crash, closed window, kick). Turning keep-alive on
+      // for an account that is not open does not start it, unless the person allowed that in Settings.
+      if (!s.armed && !w.startOnEnable) {
+        s.failures = 0; s.nextAttemptAt = 0;
+        this.setStatus(s, 'idle', 'Standby: keep-alive relaunches this account only after a client that was open closes. Launch it yourself to start.');
+        continue;
+      }
       if (s.nextAttemptAt && now < s.nextAttemptAt) {
         this.setStatus(s, 'waiting', `${s.msg ? s.msg + ' - ' : ''}retry in ${Math.ceil((s.nextAttemptAt - now) / 1000)}s`);
         continue;
@@ -248,7 +311,7 @@ class Watchdog extends EventEmitter {
         if (e && e.guardPaused) {
           // refused by the captcha guard, not a failed launch: no backoff, no alert
           s.nextAttemptAt = 0; s.launches.pop();
-          this.setStatus(s, 'paused', 'Captcha guard: automation paused');
+          this.setStatus(s, 'paused', e.outsideWindow ? 'Outside the run window' : 'Captcha guard: automation paused');
           return;
         }
         if (e && e.commitShort) {
@@ -276,6 +339,42 @@ class Watchdog extends EventEmitter {
         this.emit('change');
       });
     }
+    if (this.resumeOn) this.saveResume();
+  }
+
+  /**
+   * After a restart of the manager or the PC: read the list of keep-alive accounts that were running and schedule each one to start, one
+   * at a time. Runs once, on the first tick. Accounts closed on purpose were taken off the list when they were stopped.
+   */
+  applyResume(now = Date.now(), rand = Math.random) {
+    this.resumePlanned = true;
+    const w = this.settings.get('watchdog');
+    if (w.resumeAfterRestart === false) return [];
+    let saved = null;
+    try { saved = readJson(this.resumeFile, null); } catch { saved = null; }
+    const launchDelayMs = (Number(this.settings.get('launchDelaySec')) || 6) * 1000;
+    const plan = planResume({ saved, accounts: this.accounts.list, now, launchDelayMs, rand });
+    let n = 0;
+    for (const p of plan) {
+      if (this.launcher.byAccount(p.id).length || this.launcher.pending.has(p.id)) continue;
+      const s = this.st(p.id);
+      s.armed = true; s.resumed = true; s.nextAttemptAt = p.at; s.msg = 'resuming after a restart';
+      const acc = this.accounts.get(p.id);
+      if (acc) this.note(acc, 'resume', 'The manager restarted while this account was running. Bringing it back.');
+      n++;
+    }
+    if (n) log.info(`resuming ${n} keep-alive account(s) after a restart, one at a time`);
+    return plan;
+  }
+
+  /** Remember which keep-alive accounts are running (armed), so a restart of the PC or the manager can bring them back. */
+  saveResume(now = Date.now()) {
+    if (this.stopped) return;
+    const ids = (this.accounts.list || []).filter((a) => a.keepAlive && a.keepAlive.enabled && this.st(a.id).armed).map((a) => a.id);
+    const key = JSON.stringify(ids);
+    if (key === this.resumeSaved && now - this.resumeSavedAt < RESUME_REFRESH_MS) return;
+    this.resumeSaved = key; this.resumeSavedAt = now;
+    try { atomicWrite(this.resumeFile, JSON.stringify({ at: now, accounts: ids })); } catch (e) { log.warn('could not save the resume list: ' + e.message); }
   }
 
   pickTarget(acc, s, w) {
@@ -329,7 +428,12 @@ class Watchdog extends EventEmitter {
     return out;
   }
 
-  stop() { clearTimeout(this.timer); }
+  /** clearResume: the clients are being closed on purpose with the manager, so the next start must not bring them back. */
+  stop({ clearResume = false } = {}) {
+    this.stopped = true;
+    clearTimeout(this.timer);
+    if (clearResume && this.resumeOn) { try { atomicWrite(this.resumeFile, JSON.stringify({ at: Date.now(), accounts: [] })); } catch {} }
+  }
 }
 
-module.exports = { Watchdog, rejoinDelay, exitBurst };
+module.exports = { Watchdog, rejoinDelay, exitBurst, planResume };

@@ -62,7 +62,7 @@ $inputs += $extFiles | ForEach-Object { @{ Path = $_.FullName; Entry = "extensio
         $archive.Dispose()
     }
 
-    $name = "Isa-Roblox-Account-Manager-$($package.version)-win-x64.exe"
+    $name = "10k-Account-Manager-$($package.version)-win-x64.exe"
     $executable = Join-Path $stage $name
     $versionSource = Join-Path $stage 'Version.cs'
     $version = [version]$package.version

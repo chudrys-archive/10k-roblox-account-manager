@@ -3,6 +3,8 @@ const fs = require('fs');
 const path = require('path');
 const EventEmitter = require('events');
 const { logger } = require('./util');
+const { parseGraphicsApi } = require('./fflags');
+const { parseLogVersion } = require('./runlog');
 
 const log = logger('logwatch');
 const LOG_DIR = path.join(process.env.LOCALAPPDATA || '', 'Roblox', 'logs');
@@ -17,6 +19,12 @@ const REASONS = {
 };
 const SAME_ACCOUNT = new Set([264, 273]);
 // Roblox refused the sign-in ticket. The client logs this and quits.
+// A client whose join request Roblox answered with a challenge (HTTP 403 on join-game, flagged challengedByGcs) never gets into the game: the account needs a check.
+// VerifyPatch is an unrelated feature name. The client UI calling account-unlock-api and getting "Challenge required" is NOT excluded:
+// the one account that logged it was moderated by Roblox minutes later, so it is a real signal (main.js re-checks the account).
+const NOT_A_VERIFICATION_RE = /VerifyPatch/i;
+const JOIN_CHALLENGE_RE = /status:403\b[^\r\n]*gamejoin\.roblox\.com\/v1\/join-game[^\r\n]*challengedByGcs/i;
+const isJoinChallenge = (line) => JOIN_CHALLENGE_RE.test(String(line));
 const AUTH_FAIL_RE = /WebLogin authentication is failed|WebLogin HTTP error, statusCode: 403/;
 // A captcha / security check shown inside the Roblox client.
 const VERIFY_RE = /\b(?:captcha|funcaptcha|arkose|rblx-challenge|challengeRequired|challenge (?:is )?required|human verification|verify (?:that )?you(?:'re| are) (?:a )?human)\b/i;
@@ -103,6 +111,7 @@ class LogWatcher extends EventEmitter {
         // replay the whole file once so state (joined server, disconnects) is correct after adoption
         this.files.set(inst.pid, { file: c.full, offset: 0, rest: '' });
         inst.logState = inst.logState || { inGame: false };
+        inst.logState.robloxVersion = parseLogVersion(path.basename(c.full));
         log.debug(`pid ${inst.pid} -> ${path.basename(c.full)}`);
       }
       // give up after 3 minutes (e.g. log folder elsewhere); presence checks still cover it
@@ -131,13 +140,21 @@ class LogWatcher extends EventEmitter {
 
   parse(inst, line) {
     const s = inst.logState || (inst.logState = { inGame: false });
+    if (isJoinChallenge(line)) {
+      // Roblox shows its own challenge page in the client window and the client carries on once it is solved.
+      // That is not an account verification: report it, never close the client or flag the account.
+      if (!s.joinChallenge) { s.joinChallenge = true; this.emit('joinchallenge', inst, line.slice(0, 300)); }
+      return;
+    }
     if (AUTH_FAIL_RE.test(line)) {
       if (!s.authFailed) { s.authFailed = true; this.emit('authfail', inst, line.slice(0, 300)); }
       return;
     }
+    const api = parseGraphicsApi(line);
+    if (api && !s.graphicsApi) { s.graphicsApi = api; this.launcher.emit('change'); }
     let m = line.match(/! Joining game '([0-9a-f-]{36})' place (\d+)/i);
     if (m) {
-      Object.assign(s, { inGame: true, jobId: m[1].toLowerCase(), placeId: Number(m[2]), joinedAt: Date.now(), disconnectedAt: 0, code: 0, reason: '' });
+      Object.assign(s, { inGame: true, jobId: m[1].toLowerCase(), placeId: Number(m[2]), joinedAt: Date.now(), disconnectedAt: 0, code: 0, reason: '', tpFails: 0, rejoinLoop: false });
       this.emit('join', inst, s);
       this.launcher.emit('change');
       return;
@@ -153,9 +170,34 @@ class LogWatcher extends EventEmitter {
       }
       return;
     }
-    if (VERIFY_RE.test(line) && !/VerifyPatch/i.test(line) && !s.verification) {
+    if (VERIFY_RE.test(line) && !NOT_A_VERIFICATION_RE.test(line) && !s.verification) {
       s.verification = true;
       this.emit('verification', inst, line.slice(0, 300));
+      return;
+    }
+    // Newer clients word the disconnect as text and print no numeric code (seen: kicked / joined from another device).
+    m = line.match(/Client has been disconnected with reason: (.+?)\s*$/) || line.match(/Lost connection with reason\s*: (.+?)\s*$/);
+    if (m) {
+      const txt = m[1];
+      if (!s.disconnectedAt) s.disconnectedAt = Date.now();
+      s.inGame = false;
+      s.reason = /kicked/i.test(txt) ? 'kicked from the game' : /another device/i.test(txt) ? 'same account launched elsewhere' : txt.slice(0, 120);
+      this.emit('disconnect', inst, s);
+      this.launcher.emit('change');
+      return;
+    }
+    // After a disconnect the client retries the join about once a second. Repeated rejections without a
+    // single successful join mean the retry will never work (account moderated, place closed): mark it dead.
+    if (/raiseTeleportInitFailedEvent: Teleport failed because/.test(line)) {
+      s.tpFails = (s.tpFails || 0) + 1;
+      if (s.tpFails >= 10 && !s.rejoinLoop) {
+        s.rejoinLoop = true;
+        s.inGame = false;
+        if (!s.disconnectedAt) s.disconnectedAt = Date.now();
+        s.reason = 'reconnect failing (join rejected, account may be moderated)';
+        this.emit('disconnect', inst, s);
+        this.launcher.emit('change');
+      }
       return;
     }
     // Idle kicks (278) never print "Disconnection Notification"; the replicator records the reason first.
@@ -194,4 +236,4 @@ class LogWatcher extends EventEmitter {
   stop() { clearInterval(this.timer); }
 }
 
-module.exports = { LogWatcher, REASONS, SAME_ACCOUNT, LOG_DIR, VERIFY_RE };
+module.exports = { LogWatcher, REASONS, SAME_ACCOUNT, LOG_DIR, VERIFY_RE, NOT_A_VERIFICATION_RE, isJoinChallenge };

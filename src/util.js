@@ -46,13 +46,32 @@ function rotateIfNeeded() {
   } catch {}
 }
 let logCount = 0;
+// Log lines are queued and appended every 250 ms instead of one synchronous write per line; the queue is flushed on exit.
+let pending = [];
+let flushTimer = null;
+function flushLog() {
+  flushTimer = null;
+  if (!pending.length) return;
+  const chunk = pending.join('');
+  pending = [];
+  fs.appendFile(LOG_FILE, chunk, () => {});
+}
+function flushLogSync() {
+  if (!pending.length) return;
+  const chunk = pending.join('');
+  pending = [];
+  try { fs.appendFileSync(LOG_FILE, chunk); } catch {}
+}
+process.on('exit', flushLogSync);
 function log(level, scope, msg) {
   const entry = { t: new Date().toISOString(), level, scope, msg: redact(msg instanceof Error ? msg.message : msg) };
   ring.push(entry);
   if (ring.length > 1500) ring.shift();
   bus.emit('log', entry);
   if (++logCount % 200 === 0) rotateIfNeeded();
-  try { fs.appendFileSync(LOG_FILE, `${entry.t} [${level.toUpperCase()}] ${scope}: ${entry.msg}\n`); } catch {}
+  pending.push(`${entry.t} [${level.toUpperCase()}] ${scope}: ${entry.msg}\n`);
+  if (pending.length > 500) flushLog();
+  else if (!flushTimer) { flushTimer = setTimeout(flushLog, 250); if (flushTimer.unref) flushTimer.unref(); }
   if (process.env.IRAM_DEBUG || level === 'error') console.log(`[${level}] ${scope}: ${entry.msg}`);
 }
 const logger = (scope) => ({
@@ -89,6 +108,20 @@ function readJson(file, fallback) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fallback; }
 }
 
+/**
+ * Like readJson, but a file that exists and cannot be parsed is moved aside (name.corrupt-<time>) instead of being
+ * treated as empty, so the next save cannot overwrite what the user had. Returns { data, corrupt }.
+ */
+function readJsonSafe(file, fallback) {
+  let text;
+  try { text = fs.readFileSync(file, 'utf8'); } catch { return { data: fallback, corrupt: null }; }
+  try { return { data: JSON.parse(text), corrupt: null }; } catch (e) {
+    const aside = `${file}.corrupt-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+    try { fs.renameSync(file, aside); } catch { /* leave it in place */ }
+    return { data: fallback, corrupt: aside, error: e.message };
+  }
+}
+
 async function rmrf(dir, tries = 10) {
   for (let i = 0; i < tries; i++) {
     try { fs.rmSync(dir, { recursive: true, force: true }); return true; } catch { await sleep(500); }
@@ -123,6 +156,6 @@ async function pool(items, limit, fn) {
 }
 
 module.exports = {
-  ROOT, DATA, bus, log, logger, ring, sleep, atomicWrite, readJson, rmrf, deepMerge, pool,
+  ROOT, DATA, bus, log, logger, ring, sleep, atomicWrite, readJson, readJsonSafe, flushLogSync, rmrf, deepMerge, pool,
   extractCookie, redact, uuid: () => crypto.randomUUID(),
 };

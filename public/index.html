@@ -3,31 +3,64 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Isa's Roblox Account Manager</title>
+<title>10k's Account Manager</title>
 <link rel="stylesheet" href="/style.css">
+<link rel="icon" type="image/svg+xml" href="/logo.svg">
 <link rel="icon" type="image/png" href="/icon.png">
 <script src="/theme.js"></script>
 </head>
 <body>
 <div class="shell">
-  <aside class="sidebar">
-    <div class="brand"><div class="logo">IR</div><div><b>Isa's Manager</b><span>Roblox accounts</span></div></div>
+  <header class="topbar">
+    <div class="brand"><img class="logo" src="/logo.svg" alt=""><div><b>10k's</b><span>Account Manager</span></div></div>
     <nav class="nav">
-      <button data-tab="accounts" class="active"><svg class="i" data-icon="users"></svg><span>Accounts</span><em class="count" id="nav-acc"></em></button>
+      <button data-tab="clients" class="active"><svg class="i" data-icon="monitor"></svg><span>Clients</span><em class="count" id="nav-run"></em></button>
+      <button data-tab="accounts"><svg class="i" data-icon="users"></svg><span>Accounts</span><em class="count" id="nav-acc"></em></button>
       <button data-tab="servers"><svg class="i" data-icon="server"></svg><span>Servers</span></button>
-      <button data-tab="settings"><svg class="i" data-icon="gear"></svg><span>Settings</span></button>
       <button data-tab="logs"><svg class="i" data-icon="list"></svg><span>Activity</span><em class="count" id="nav-err"></em></button>
+      <button data-tab="experiments"><svg class="i" data-icon="flask"></svg><span>Experiments</span><em class="nav-tag">ADV</em></button>
+      <button data-tab="settings"><svg class="i" data-icon="gear"></svg><span>Settings</span></button>
     </nav>
-    <div class="side-status" id="side-status"></div>
-    <div class="side-foot">
-      <button class="btn ghost sm" id="btn-theme" title="Switch light / dark"><svg class="i" data-icon="contrast"></svg><span id="theme-label">Light mode</span></button>
-      <button class="btn ghost sm icon" id="btn-quit" title="Quit manager and its background processes" style="flex:0"><svg class="i" data-icon="power"></svg></button>
+    <div class="top-right">
+      <div class="side-status" id="side-status"></div>
+      <div class="tools">
+        <button class="btn ghost sm" id="btn-palette" title="Search pages, accounts and actions (Ctrl+K)"><svg class="i" data-icon="search"></svg><span class="lbl">Search</span><span class="kbd">Ctrl K</span></button>
+        <button class="btn ghost sm" id="btn-theme" title="Switch light / dark"><svg class="i" data-icon="contrast"></svg><span id="theme-label">Light mode</span></button>
+        <button class="btn ghost sm icon" id="btn-navsize" title="Navigation size: full, or a small floating bar"><svg class="i" data-icon="chevron"></svg><span class="lbl">Collapse</span></button>
+        <button class="btn ghost sm icon" id="btn-quit" title="Quit manager and its background processes"><svg class="i" data-icon="power"></svg><span class="lbl">Quit</span></button>
+      </div>
     </div>
-  </aside>
+  </header>
 
   <main>
+    <!-- CLIENTS -->
+    <section id="tab-clients" class="tab active">
+      <div class="page-head"><div class="ph-text"><h1>Clients</h1><span class="sub">Every Roblox window the manager is running, live.</span></div></div>
+      <div class="health" id="health"></div>
+      <div class="preflight" id="preflight"></div>
+      <div class="panel fleet">
+        <div class="toolbar">
+          <b>Running now</b><span class="muted small" id="fleet-sub"></span><span class="spacer"></span>
+          <button class="btn sm" id="fleet-snap" title="Record handles, GDI/USER objects, threads and memory pools for every client. A second snapshot shows the change per minute"><svg class="i" data-icon="cpu"></svg>Snapshot</button>
+          <button class="btn sm" id="fleet-map" title="Walk every client's address space and total the committed memory by kind (private, image, mapped) and protection. A second map shows the change per minute"><svg class="i" data-icon="layers"></svg>Memory map</button>
+          <button class="btn sm" id="fleet-tile" title="Arrange the Roblox windows in a grid"><svg class="i" data-icon="grid"></svg>Tile</button>
+          <button class="btn sm danger" id="fleet-close" title="Close every client, one at a time"><svg class="i" data-icon="stop"></svg>Close all</button>
+        </div>
+        <div class="fleet-scroll">
+          <table class="fleet-table">
+            <thead><tr><th>Account</th><th>State</th><th>Uptime</th><th>Private memory</th><th>CPU</th><th>Growth</th><th>History</th><th>Last event</th><th>Last error</th></tr></thead>
+            <tbody id="fleet-body"></tbody>
+          </table>
+          <div class="snap hidden" id="fleet-snapout"></div>
+          <div class="fleet-empty hidden" id="fleet-empty"><div class="empty-art"><svg class="i" data-icon="monitor"></svg></div><b>No clients running</b><p>Launch an account and it appears here with live memory use and growth. Keep-alive accounts waiting to rejoin show up here too.</p><button class="btn primary" type="button" data-goto="accounts"><svg class="i" data-icon="users"></svg>Go to Accounts</button></div>
+          <div class="runs"><div class="muted runs-h">Recent runs</div><table class="fleet-table"><thead><tr><th>Account</th><th>Ended</th><th>Ran for</th><th>Peak private memory</th><th>How it ended</th></tr></thead><tbody id="runs-body"></tbody></table></div>
+        </div>
+      </div>
+    </section>
+
     <!-- ACCOUNTS -->
-    <section id="tab-accounts" class="tab active">
+    <section id="tab-accounts" class="tab">
+      <div class="page-head"><div class="ph-text"><h1>Accounts</h1><span class="sub">Add your accounts, pick a game and launch them together.</span></div></div>
       <div class="guard-banner hidden" id="guard-banner" role="alert"></div>
       <div class="update-banner hidden" id="update-banner" role="status"></div>
       <div class="stats" id="stats"></div>
@@ -41,7 +74,7 @@
             <button class="btn ghost" id="btn-check" title="Check cookies without adding them: valid, created, Robux, banned"><svg class="i" data-icon="shield"></svg>Check cookies</button>
             <button class="btn ghost" id="btn-check-ban" title="Log into one account in a separate window to see if it is banned. Nothing is added. One at a time."><svg class="i" data-icon="search"></svg>Check ban</button>
             <button class="btn ghost" id="btn-validate" title="Re-check cookies, bans and Robux"><svg class="i" data-icon="check"></svg>Validate</button>
-            <button class="btn ghost" id="btn-signup" title="Open the Roblox sign-up page in your own Chrome. The new account is added once Roblox logs it in."><svg class="i" data-icon="plus"></svg>Create account</button>
+            <button class="btn ghost" id="btn-signup" title="Open the Roblox sign-up page in a sign-in window. The new account is added once Roblox logs it in."><svg class="i" data-icon="plus"></svg>Create account</button>
             <button class="btn primary" id="btn-add"><svg class="i" data-icon="plus"></svg>Add account</button>
           </div>
           <div class="table-wrap">
@@ -93,6 +126,7 @@
             <h3><svg class="i" data-icon="window"></svg>Windows</h3>
             <div class="btn-row" style="margin-top:0">
               <button class="btn sm" id="btn-tile"><svg class="i" data-icon="grid"></svg>Tile</button>
+    <button class="btn sm" id="btn-trim" title="Release idle RAM of every client, one at a time (about 3 seconds apart)"><svg class="i" data-icon="zap"></svg>Free RAM</button>
               <button class="btn sm danger" id="btn-kill-all"><svg class="i" data-icon="stop"></svg>Close all</button>
             </div>
             <div class="small" id="untracked" style="margin-top:8px"></div>
@@ -117,7 +151,7 @@
 
     <!-- SERVERS -->
     <section id="tab-servers" class="tab">
-      <div class="page-head"><h1>Server browser</h1><span class="sub">Join buttons use the accounts selected on the Accounts page.</span></div>
+      <div class="page-head"><div class="ph-text"><h1>Servers</h1><span class="sub">Browse a game's servers. Join buttons use the accounts selected on the Accounts page.</span></div></div>
       <div class="card" style="margin-bottom:14px">
         <div class="toolbar" style="padding:0;border:0">
           <div class="search" style="max-width:none"><svg class="i" data-icon="search"></svg><input id="srv-place" placeholder="Place ID or game link"></div>
@@ -146,14 +180,39 @@
 
     <!-- SETTINGS -->
     <section id="tab-settings" class="tab">
-      <div class="page-head"><h1>Settings</h1></div>
+      <div class="page-head"><div class="ph-text"><h1>Settings</h1><span class="sub">Changes apply to the next launches. Click a section title to fold it.</span></div><div class="spacer"></div>
+        <div class="search settings-search"><svg class="i" data-icon="search"></svg><input id="settings-search" type="search" placeholder="Search settings" autocomplete="off"></div></div>
       <form id="settings-form"></form>
     </section>
 
     <!-- LOGS -->
+    <section id="tab-experiments" class="tab">
+      <div class="page-head"><div class="ph-text"><h1>Experiments <span class="tag-adv">Advanced</span></h1><span class="sub">Measure which settings keep your clients lean and stable on your PC.</span></div></div>
+      <div class="panel exp">
+        <p class="lead">Compare one setting between runs. The same accounts and game are used in every round, and the report shows each client's baseline and how fast its memory grows. Your own setting is put back afterwards.</p>
+        <div id="exp-builder"></div>
+        <div id="exp-status" class="exp-status"></div>
+      </div>
+      <div class="panel exp" id="prof">
+        <h3>Launch profiles</h3>
+        <p class="lead">A profile is a saved bundle of run settings. Applying one changes settings for the next launches. The built-in ones are starting points: use an experiment to check them on your PC.</p>
+        <div class="prof-grid" id="prof-list"></div>
+        <div class="prof-save"><input id="prof-name" placeholder="Name for the current settings"><button class="btn" id="prof-save" type="button">Save current as profile</button></div>
+        <div class="prof-save"><input id="prof-code" placeholder="Paste a profile code to import it"><button class="btn" id="prof-import" type="button">Import code</button></div>
+<p class="muted" id="prof-now"></p>
+      </div>
+      <div class="panel exp" id="script-audit">
+        <h3>Script check</h3>
+        <p class="lead">Reads the Lua and Luau scripts in a folder and points at patterns that make a long session use more and more memory, such as loops with no wait or connections that are never removed. It is a quick read of the text, so treat a finding as a reason to look, not proof.</p>
+        <div class="prof-save"><input id="audit-path" placeholder="Folder or script file, for example your scripts folder"><button class="btn" id="audit-run" type="button">Check scripts</button></div>
+        <div id="audit-out" class="audit-out"></div>
+      </div>
+      <div class="panel exp" id="exp-past"></div>
+    </section>
     <section id="tab-logs" class="tab">
-      <div class="page-head"><h1>Activity</h1><div class="spacer"></div>
+      <div class="page-head"><div class="ph-text"><h1>Activity</h1><span class="sub">What the manager did, newest last.</span></div><div class="spacer"></div>
         <div class="search" style="max-width:260px"><svg class="i" data-icon="search"></svg><input id="log-search" placeholder="Filter (account, word…)"></div>
+        <button class="btn sm" id="log-export" title="Save the lines shown here (current filter and search) as a text file">Export</button>
         <div class="chips" id="log-chips"><span class="chip on" data-lvl="">All</span><span class="chip" data-lvl="warn">Warnings</span><span class="chip" data-lvl="error">Errors</span></div>
       </div>
       <pre class="logbox" id="log-view"></pre>
@@ -163,7 +222,7 @@
 
 <div class="lock hidden" id="lock">
   <form id="unlock-form" class="card">
-    <div class="logo">IR</div>
+    <img class="logo" src="/logo.svg" alt="">
     <h2 style="margin:0 0 4px">Vault locked</h2>
     <p class="muted" style="margin:0 0 14px">Enter your master password to continue.</p>
     <input type="password" id="unlock-pw" autocomplete="current-password">

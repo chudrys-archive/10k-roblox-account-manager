@@ -1,4 +1,4 @@
-' Starts Isa's Roblox Account Manager without a console window.
+' Starts 10k's Account Manager without a console window.
 ' If it is already running, this just opens its window.
 ' Quit from the app (sidebar > Quit). Your Roblox clients keep running either way.
 Option Explicit
