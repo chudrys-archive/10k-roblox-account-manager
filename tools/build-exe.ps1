@@ -48,7 +48,7 @@ try {
         $sourceFiles = Get-ChildItem -LiteralPath (Join-Path $root 'src') -File |
             Where-Object Extension -In '.js', '.ps1'
         $publicFiles = Get-ChildItem -LiteralPath (Join-Path $root 'public') -File |
-            Where-Object Extension -In '.html', '.css', '.js', '.png'
+            Where-Object Extension -In '.html', '.css', '.js', '.png', '.svg', '.ico'
         $inputs += $sourceFiles | ForEach-Object { @{ Path = $_.FullName; Entry = "src/$($_.Name)" } }
         $inputs += $publicFiles | ForEach-Object { @{ Path = $_.FullName; Entry = "public/$($_.Name)" } }
 $extFiles = Get-ChildItem -LiteralPath (Join-Path $root 'tools\chrome-extension') -File
