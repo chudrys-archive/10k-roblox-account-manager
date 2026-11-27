@@ -220,7 +220,7 @@ class Watchdog extends EventEmitter {
       if (acc.status === 'verify') { this.setStatus(s, 'error', 'needs verification'); continue; }
       if (acc.status === 'invalid' || acc.status === 'banned') { this.setStatus(s, 'error', acc.statusMsg || 'account unusable'); continue; }
       if (this.launcher.pending.has(acc.id)) { s.armed = true; this.setStatus(s, 'launching'); continue; }
-      if (this.launcher.isHeld?.(acc.id) && !this.launcher.byAccount(acc.id).length) { s.armed = false; this.setStatus(s, 'waiting', 'launch cancelled - not relaunching'); continue; }
+      if (this.launcher.isHeld?.(acc.id) && !this.launcher.byAccount(acc.id).length) { s.armed = false; this.setStatus(s, 'stopped', 'closed on purpose - keep-alive will not relaunch it until you launch it'); continue; }
 
       const inst = this.launcher.byAccount(acc.id)[0];
       if (inst) {
@@ -267,6 +267,19 @@ class Watchdog extends EventEmitter {
           if (acc.keepAlive.target && acc.keepAlive.target.type === 'job') s.jobMisses++;
           await this.restart(acc, inst, `disconnected: ${ls.reason}`);
           continue;
+        }
+        // Stalled: the client is alive but has not joined any server for too long (stuck loading, frozen after a kick with nothing in its log).
+        // Only judged when the client's log is matched, and counted against the same rejoin budget as a kick.
+        if (w.noJoinRestartMin && ls) {
+          const lastJoin = ls.joinedAt || inst.startedAt;
+          if (lastJoin && now - lastJoin > w.noJoinRestartMin * 60e3) {
+            const mins = Math.round((now - lastJoin) / 60e3);
+            log.warn(`${acc.username}: no server joined for ${mins} min - restarting`);
+            this.alerts.send('disconnect', `${acc.username}: stalled`, `The client has not joined a server for ${mins} minutes. Restarting it.`, { key: acc.id });
+            if (this.recordDrop(acc, s)) { await this.launcher.kill([inst.pid], 'rejoin budget reached'); continue; }
+            await this.restart(acc, inst, `no server joined for ${mins} min`);
+            continue;
+          }
         }
         if (w.restartEveryMin && !(acc.main && this.settings.get('closeAllKeepsMain') !== false) && now - inst.startedAt > w.restartEveryMin * 60000) {
           log.info(`${acc.username}: scheduled restart`);
@@ -393,6 +406,29 @@ class Watchdog extends EventEmitter {
     s.msg = reason;
     this.note(acc, 'restart', reason);
     await this.launcher.kill([inst.pid], reason);
+  }
+
+  /**
+   * The screen check saw a stuck client: kind is 'frozen' (the picture stopped changing), 'dialog' (an error dialog is showing) or
+   * 'moderation' (a ban/termination message: reported, never relaunched). Restarts count against the same rejoin budget as a kick.
+   */
+  async screenIssue(acc, inst, kind, detail = '') {
+    const s = this.st(acc.id);
+    if (!acc.keepAlive.enabled || !this.launcher.instances.has(inst.pid)) return;
+    if (this.guard && this.guard.paused) return;
+    if (kind === 'moderation') {
+      if (s.screenModeration === inst.pid) return;
+      s.screenModeration = inst.pid;
+      log.warn(`${acc.username}: the window shows a moderation message - not relaunching`);
+      this.alerts.send('disconnect', `${acc.username}: moderation message`, `The client window shows: ${detail}. It was left open. Check the account.`, { level: 'error', key: acc.id });
+      this.note(acc, 'screen', `Moderation message on screen: ${detail}`);
+      return;
+    }
+    const reason = kind === 'frozen' ? `screen frozen for ${detail}` : `error dialog on screen: ${detail}`;
+    log.warn(`${acc.username}: ${reason} - restarting`);
+    this.alerts.send('disconnect', `${acc.username}: ${kind === 'frozen' ? 'frozen' : 'error dialog'}`, `${reason}. Restarting the client.`, { key: acc.id });
+    if (this.recordDrop(acc, s)) { await this.launcher.kill([inst.pid], 'rejoin budget reached'); return; }
+    await this.restart(acc, inst, reason);
   }
 
   async checkPresence(acc, inst, s) {

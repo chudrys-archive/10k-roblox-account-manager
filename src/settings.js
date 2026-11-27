@@ -57,6 +57,9 @@ const DEFAULTS = {
     disconnectGraceSec: 25,    // log says disconnected and no rejoin within this -> restart
     relaunchDelaySec: 15,       // first rejoin; repeated rejoins back off (x2 each, max 10 min)
     killHungAfterSec: 0,        // 0 = never force-kill a frozen client (a kill also closes any executor in it)
+    screenCheckSec: 0,          // 0 = off; otherwise look at each keep-alive client's window this often (frozen picture, error dialogs). Reads the screen in memory, stores nothing
+    frozenMin: 20,              // screen check: restart a client whose picture has not changed for this many minutes
+    noJoinRestartMin: 0,        // 0 = off; otherwise restart a client that is running but has not joined any server for this many minutes (set it above your longest round)
     maxRelaunchesPerHour: 15,
     fallbackToPublic: true,    // if a specific JobId keeps failing, join any server instead
     restartEveryMin: 0,        // 0 = never; otherwise scheduled restart of keep-alive clients
@@ -171,6 +174,9 @@ class Settings extends EventEmitter {
     w.badChecksToRestart = num(w.badChecksToRestart, 2, 1, 10);
     w.relaunchDelaySec = num(w.relaunchDelaySec, 15, 0, 600);
     w.killHungAfterSec = num(w.killHungAfterSec, 0, 0, 3600);
+    w.noJoinRestartMin = num(w.noJoinRestartMin, 0, 0, 240);
+    w.screenCheckSec = w.screenCheckSec ? num(w.screenCheckSec, 60, 30, 3600) : 0;
+    w.frozenMin = num(w.frozenMin, 20, 5, 240);
     w.maxRelaunchesPerHour = num(w.maxRelaunchesPerHour, 15, 1, 120);
     w.restartEveryMin = num(w.restartEveryMin, 0, 0, 1440);
     w.breakerDisconnects = num(w.breakerDisconnects, 4, 0, 50);

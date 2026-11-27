@@ -14,6 +14,7 @@ const { Vault } = require('./vault');
 const { AccountStore } = require('./accounts');
 const { Launcher } = require('./launcher');
 const { Watchdog } = require('./watchdog');
+const { ScreenCheck } = require('./screencheck');
 const { BrowserManager, findBrowser } = require('./browser');
 const { Server } = require('./server');
 const { AntiAfk } = require('./antiafk');
@@ -145,6 +146,7 @@ async function main() {
   const alerts = new Alerts({ settings });
   const logwatch = new LogWatcher({ launcher });
   const watchdog = new Watchdog({ launcher, accounts, settings, logwatch, alerts, guard });
+  const screenCheck = new ScreenCheck({ launcher, accounts, settings, watchdog });
   const capture = new CaptureGate();
   const browser = new BrowserManager({ settings, accounts, capture });
   const antiAfk = new AntiAfk({ helper, launcher, settings, accounts });
@@ -214,6 +216,7 @@ const ctx = { tray, executor, settings, vault, accounts, launcher, watchdog, bro
   await launcher.init();
   logwatch.start();
   watchdog.start();
+  screenCheck.start();
   executor.start();
   antiAfk.start();
 
@@ -242,6 +245,7 @@ const ctx = { tray, executor, settings, vault, accounts, launcher, watchdog, bro
   const shutdown = async (sig, { closeClients = false } = {}) => {
     if (stopping) return; stopping = true;
     log.info(`shutting down (${sig}${closeClients ? ', closing Roblox clients' : ''})`);
+    screenCheck.stop();
     watchdog.stop({ clearResume: closeClients });
     antiAfk.stop();
     guard.stop();

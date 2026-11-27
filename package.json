@@ -1,6 +1,6 @@
-{
+﻿{
     "name":  "10k-account-manager",
-    "version": "7.2.0",
+    "version": "7.2.1",
     "private":  true,
     "description":  "Roblox multi-account manager: encrypted vault, multi-instance, keep-alive watchdog, server browser, local API.",
     "main":  "src/main.js",

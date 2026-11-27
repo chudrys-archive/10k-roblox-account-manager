@@ -244,6 +244,29 @@ document.addEventListener('click', (e) => {
 });
 
 // ============================================================ live connection
+// When the manager goes away the page keeps showing the last state it received. Say so loudly, and find out why.
+let connLostTimer = null;
+function setConnLost(lost) {
+  let b = document.getElementById('conn-banner');
+  if (!lost) {
+    clearInterval(connLostTimer); connLostTimer = null;
+    if (b) b.remove();
+    return;
+  }
+  if (!b) { b = document.createElement('div'); b.id = 'conn-banner'; b.className = 'conn-banner'; document.body.prepend(b); }
+  b.textContent = 'Lost connection to the manager. Everything below is old data.';
+  if (connLostTimer) return;
+  connLostTimer = setInterval(async () => {
+    const bar = document.getElementById('conn-banner');
+    try {
+      const r = await fetch('/ui/state', { cache: 'no-store' });
+      if (r.ok) { location.reload(); return; }
+      if (bar) bar.textContent = r.status === 401
+        ? 'The manager was restarted and this window can no longer talk to it. Close this window and open the manager again. Everything below is old data.'
+        : 'The manager answered with an error. Everything below is old data.';
+    } catch { if (bar) bar.textContent = 'The manager is not running. Everything below is old data.'; }
+  }, 3000);
+}
 function connect() {
   const es = new EventSource('/ui/events');
   es.addEventListener('state', (e) => { S = JSON.parse(e.data); render(); });
@@ -254,8 +277,8 @@ function connect() {
     if ($('#tab-logs').classList.contains('active')) renderLogs();
   });
   es.addEventListener('toast', (e) => { const t = JSON.parse(e.data); toast(t.type, t.msg); });
-  es.onopen = () => $('#side-status')?.classList.remove('err');
-  es.onerror = () => { $('#side-status').innerHTML = '<div class="row bad"><span class="dot err"></span>Disconnected – is the manager running?</div>'; };
+  es.onopen = () => { $('#side-status')?.classList.remove('err'); setConnLost(false); };
+  es.onerror = () => { $('#side-status').innerHTML = '<div class="row bad"><span class="dot err"></span>Disconnected – is the manager running?</div>'; setConnLost(true); };
 }
 call('/ui/logs').then((l) => logs.push(...l)).catch(() => {});
 connect();
@@ -372,7 +395,7 @@ function renderStats() {
 
 // ============================================================ clients (live fleet)
 const STATE_CLASS = { ok: 'ok', launching: 'warn', degraded: 'warn', failed: 'err' };
-const WATCH_CLASS = { error: 'err', throttled: 'err', waiting: 'warn' };
+const WATCH_CLASS = { error: 'err', throttled: 'err', waiting: 'warn', stopped: 'muted' };
 const fmtGB = (mb) => (mb == null ? '\u2014' : `${(mb / 1024).toFixed(2)} GB`);
 function fmtHours(h) {
   if (h == null) return null;
@@ -600,7 +623,7 @@ function kaCell(a) {
   const wd = S.watchdog[a.id];
   const on = a.keepAlive.enabled;
   const st = on ? (wd?.status || 'waiting') : '';
-  const label = { running: 'healthy', idle: 'standby', launching: 'launching', waiting: 'recovering', throttled: 'throttled', error: 'error', paused: 'paused' }[st] || st;
+  const label = { running: 'healthy', idle: 'standby', launching: 'launching', waiting: 'recovering', stopped: 'stopped', throttled: 'throttled', error: 'error', paused: 'paused' }[st] || st;
   return `<div style="display:flex;align-items:center;gap:8px"><label class="switch" title="${on ? esc('Target: ' + (a.keepAlive.target?.label || '')) : 'Keep this account in game automatically'}"><input type="checkbox" data-ka ${on ? 'checked' : ''}><span></span></label>
     ${on ? `<span class="badge ${esc(st)}" title="${esc(wd?.msg || '')}">${esc(label)}</span>` : wd?.msg ? `<span class="err small" title="${esc(wd.msg)}">${esc(wd.msg.slice(0, 40))}</span>` : ''}</div>`;
 }
