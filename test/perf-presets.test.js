@@ -2,7 +2,7 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const { cpuShare } = require('../src/cpu');
-const { PRESETS, matchPreset, diffPreset, byId } = require('../src/presets');
+const { PRESETS, matchPreset, diffPreset, byId, expandPreset } = require('../src/presets');
 const { roomForMore } = require('../src/metrics');
 const { Settings, DEFAULTS } = require('../src/settings');
 
@@ -34,7 +34,7 @@ test('presets: every preset is a complete, valid settings patch and is recognise
     s.data = JSON.parse(JSON.stringify(DEFAULTS));
     s.save = () => {};
     s.emit = () => {};
-    s.update(p.settings);
+    s.update(expandPreset(p.settings));
     assert.strictEqual(matchPreset(s.data), p.id, `${p.id} survives the sanitizer unchanged`);
     assert.deepStrictEqual(diffPreset(s.data, p.id), []);
   }
@@ -68,4 +68,25 @@ test('gateRoom: the launch gate plan, minus the clients already running', () => 
   assert.strictEqual(gateRoom({ limitGB: null, keepGB: 6, running: 1, peakGB: 3, floorGB: 8 }), null);
   assert.strictEqual(gateRoom({ limitGB: 0, keepGB: 6, running: 1, peakGB: 3, floorGB: 8 }), null);
   assert.strictEqual(gateRoom({ limitGB: 100, keepGB: 6, running: 0, peakGB: null, floorGB: 8 }), Math.floor(94 / 9.2));
+});
+
+test('presets: the main-PC preset sets nested watchdog values, leaves personal settings alone, and is recognised', () => {
+  const s = Object.create(Settings.prototype);
+  s.data = JSON.parse(JSON.stringify(DEFAULTS));
+  s.data.alerts.webhook = 'https://discord.com/api/webhooks/1/abc';
+  s.data.favorites = [{ name: 'g', input: '1' }];
+  s.data.executor.path = 'C:\\x\\exec.exe';
+  s.save = () => {}; s.emit = () => {};
+  assert.ok(diffPreset(s.data, 'main').length > 0);
+  s.update(expandPreset(byId('main').settings));
+  assert.strictEqual(s.data.signInGapSec, 40);
+  assert.strictEqual(s.data.watchdog.noJoinRestartMin, 35);
+  assert.strictEqual(s.data.watchdog.screenCheckSec, 60);
+  assert.strictEqual(s.data.watchdog.enabled, true);
+  assert.strictEqual(s.data.watchdog.startOnEnable, false);
+  assert.strictEqual(JSON.parse(s.data.customFFlags).FIntDebugForceMSAASamples, 1);
+  assert.strictEqual(s.data.alerts.webhook, 'https://discord.com/api/webhooks/1/abc');
+  assert.strictEqual(s.data.favorites.length, 1);
+  assert.strictEqual(s.data.executor.path, 'C:\\x\\exec.exe');
+  assert.strictEqual(matchPreset(s.data), 'main');
 });

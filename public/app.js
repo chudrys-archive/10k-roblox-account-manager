@@ -1686,12 +1686,14 @@ function presetCard() {
     const sub = cur === p.id ? 'In use' : n ? n + ' setting' + (n === 1 ? '' : 's') + ' would change' : 'Matches your settings';
     return '<button type="button" class="opt-card ' + (cur === p.id ? 'on' : '') + '" data-preset="' + esc(p.id) + '"><b>' + esc(p.name) + '</b><small>' + esc(p.blurb) + '</small><small class="preset-sub">' + esc(sub) + '</small></button>';
   }).join('');
-  return '<div class="card preset-card"><h3>' + icon('zap') + 'Performance preset</h3><p class="small muted" style="margin:0 0 10px">One click sets FPS, graphics, window size, priority, memory trim, CPU cap and minimized-window handling together. ' + (cur === 'custom' ? 'Your current mix does not match a preset.' : '') + ' Applies to clients you launch next.</p><div class="opt-grid">' + cards + '</div><div class="small muted" id="preset-preview" style="margin-top:8px"></div></div>';
+  return '<div class="card preset-card"><h3>' + icon('zap') + 'Performance preset</h3><p class="small muted" style="margin:0 0 10px">One click sets FPS, graphics, window size, priority, memory trim, CPU cap, minimized-window handling and, for the recommended setup, the sign-in gap and watchdog together. ' + (cur === 'custom' ? 'Your current mix does not match a preset.' : '') + ' Applies to clients you launch next.</p><div class="opt-grid">' + cards + '</div><div class="small muted" id="preset-preview" style="margin-top:8px"></div></div>';
 }
 function presetValue(k, v) {
   if (k === 'cpuCapPct') return v ? v + '%' : 'off';
   if (k === 'minimizedAction') return v === 'park' ? 'move off-screen' : 'leave';
   if (k === 'windowWidth' || k === 'windowHeight' || k === 'fpsCap' || k === 'graphicsLevel') return v ? String(v) : 'default';
+  if (k === 'customFFlags') return v ? 'set' : 'none';
+  if (typeof v === 'boolean') return v ? 'on' : 'off';
   if (k === 'trimMemoryMin') return v ? (v < 1 ? Math.round(v * 60) + ' s' : v + ' min') : 'off';
   return String(v);
 }

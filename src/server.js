@@ -15,7 +15,7 @@ const vmmap = require('./vmmap');
 const scriptAudit = require('./scriptaudit');
 const { metricsKey } = require('./launcher');
 const { api } = require('./roblox');
-const { PRESETS, byId: byPresetId, diffPreset, matchPreset } = require('./presets');
+const { PRESETS, byId: byPresetId, diffPreset, matchPreset, expandPreset } = require('./presets');
 const { resolveTarget, detectRoblox } = require('./launcher');
 const { findBrowser } = require('./browser');
 
@@ -545,7 +545,7 @@ class Server {
       const p = byPresetId(body && body.id);
       if (!p) throw new HttpError(400, 'unknown preset');
       const changes = diffPreset(c.settings.get(), p.id);
-      c.settings.update(p.settings);
+      c.settings.update(expandPreset(p.settings));
       this.pushState();
       return { ok: true, applied: p.id, changes };
     });
